@@ -461,15 +461,25 @@ static int score_entry(const Entry *e, const Token *tk, int nt, const wchar_t *j
         else {
             normalize_stem(e->lc, e->is_dir, stem, MAX_PATH, true);
             if (str_eq(stem, joined_ns)) s += 55;
-            else if (str_starts(stem, joined_ns)) s += 20;
+            else if (str_starts(stem, joined_ns)) s += 12;
         }
         /* prefer names close in length to the query */
         int extra = (int)wcslen(stem) - qlen;
-        if (extra > 0) s -= extra / 6;
+        if (extra > 0) s -= extra / 4;
+        /* machine-made names (timestamps, hashes) are rarely what people ask for */
+        int run = 0, maxrun = 0;
+        for (const wchar_t *c = stem; *c; c++) { run = iswdigit(*c) ? run + 1 : 0; if (run > maxrun) maxrun = run; }
+        if (maxrun >= 8) s -= 12;
+    }
+    /* things people open by voice: documents, slides, photos, media, folders */
+    switch (e->ext) {
+    case EXT_PDF: case EXT_PPT: case EXT_DOC: case EXT_SHEET:
+    case EXT_IMAGE: case EXT_VIDEO: case EXT_AUDIO: s += 10; break;
+    default: if (e->is_dir) s += 4; break;
     }
     int d = days_old(e->mt, now);
     if (d < 2) s += 8; else if (d < 14) s += 5; else if (d < 60) s += 2;
-    s -= e->depth > 2 ? (e->depth - 2) : 0;
+    s -= e->depth > 2 ? 2 * (e->depth - 2) : 0;
     return s > 0 ? s : 1;
 }
 
