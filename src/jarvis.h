@@ -168,6 +168,20 @@ typedef struct {
 
 void cmd_init(HWND dialog);
 HWND cmd_dialog(void);
+/* Dry-run (tests / --dry-run): actions are NOT performed, they are recorded
+ * instead and can be read with cmd_last_action(). Format, one action:
+ *   "OPEN <path>"        open file/folder (ShellExecute)
+ *   "REVEAL <path>"      show file selected in Explorer
+ *   "DIALOG <path>"      type path into the Upload/Open dialog
+ *   "URL <url>"          open url in the configured browser
+ *   "APP <target>"       launch program / uri / .lnk (target as configured, args after a space allowed)
+ *   "SYS <name>"         system action: lock, screenshot, volume_up, volume_down, mute, reindex
+ *   "LIST <n>"           showed n rows for the user to pick from
+ *   "SAY"                only replied (time, date, battery, help, not found...)
+ *   "CLOSE"              closed without doing anything
+ * Empty string if nothing happened yet. */
+void cmd_set_dry_run(bool on);
+const wchar_t *cmd_last_action(void);
 void cmd_run(const wchar_t *text, CmdResult *r);
 void cmd_pick(const Row *row, PickMode mode, CmdResult *r);
 /* Live results while typing; returns number of rows */
@@ -177,7 +191,8 @@ typedef void (*PhraseFn)(const wchar_t *verb, const wchar_t *name, void *ctx);
 void cmd_grammar(PhraseFn fn, void *ctx);
 
 /* --------------------------------------------------------------------- ui.c */
-bool ui_create(HINSTANCE inst, HWND dialog, bool listen);
+/* initial_cmd: optional command to run right away (from the command line) */
+bool ui_create(HINSTANCE inst, HWND dialog, bool listen, const wchar_t *initial_cmd);
 void ui_toggle_listen(void);
 int  ui_loop(void);
 
