@@ -2,6 +2,9 @@
 
 1 RT_MANIFEST "jarvis.manifest"
 
+/* App icon: LoadIconW(hInstance, MAKEINTRESOURCEW(1)) */
+1 ICON "jarvis.ico"
+
 VS_VERSION_INFO VERSIONINFO
 FILEVERSION 1,0,0,0
 PRODUCTVERSION 1,0,0,0
