@@ -43,6 +43,7 @@ void   str_copy(wchar_t *dst, size_t cap, const wchar_t *src);
 void   str_cat(wchar_t *dst, size_t cap, const wchar_t *src);
 int    tokenize(const wchar_t *s, Token *out, int max);
 int    edit_distance(const wchar_t *a, int la, const wchar_t *b, int lb, int limit);
+int    phonetic_key(const wchar_t *w, int len, wchar_t *out, int cap); /* fizzics -> fisiks */
 int    number_word(const wchar_t *w);   /* "two"/"second"/"2" -> 2, else 0 */
 wchar_t *wcs_dup(const wchar_t *s);
 char  *utf8_from_wide(const wchar_t *w);

@@ -171,8 +171,8 @@ int wmain(void)
      * (limit for a 7-letter word is 2) and with only 2 query words no miss is
      * tolerated, so the misheard query finds nothing. Reported, not fatal. */
     n = run(L"fizzics notes", NULL, EXT_ANY, 0, h);
-    WARN(n >= 1 && ends_with(&h[0], L"Physics Notes.docx"),
-         "KNOWN BUG: misheard \"fizzics notes\" does not find Physics Notes.docx");
+    CHECK(n >= 1 && ends_with(&h[0], L"Physics Notes.docx"),
+         "(fixed: phonetic match) misheard \"fizzics notes\" does not find Physics Notes.docx");
     /* milder mishearings that the fuzzy matcher is designed for must work */
     n = run(L"physiks notes", NULL, EXT_ANY, 0, h);
     CHECK(n >= 1 && ends_with(&h[0], L"Physics Notes.docx"), "\"physiks notes\" (1 sub) -> Physics Notes");

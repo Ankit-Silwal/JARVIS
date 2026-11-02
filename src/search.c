@@ -383,15 +383,23 @@ static bool fuzzy_word(const wchar_t *lc, const wchar_t *tok)
     int tl = (int)wcslen(tok);
     if (tl < 4) return false;
     int limit = tl >= 7 ? 2 : 1;
+    wchar_t tk[64], wk[64];
+    int tkl = phonetic_key(tok, tl, tk, 64);
     const wchar_t *p = lc;
     while (*p) {
         while (*p && !iswalnum(*p)) p++;
         const wchar_t *s = p;
         while (*p && iswalnum(*p)) p++;
         int wl = (int)(p - s);
-        if (wl >= 3 && edit_distance(tok, tl, s, wl, limit) <= limit) return true;
+        if (wl < 3) continue;
+        if (edit_distance(tok, tl, s, wl, limit) <= limit) return true;
         /* also allow the token to fuzzily match the start of a longer word */
-        if (wl > tl && edit_distance(tok, tl, s, tl, limit) <= (limit > 1 ? 1 : limit) && tl >= 5) return true;
+        if (wl > tl && tl >= 5 && edit_distance(tok, tl, s, tl, 1) <= 1) return true;
+        /* sounds alike? (speech recognizers spell what they hear: fizzics / physics) */
+        if (wl < 64) {
+            int wkl = phonetic_key(s, wl, wk, 64);
+            if (edit_distance(tk, tkl, wk, wkl, tkl >= 6 ? 1 : 0) <= (tkl >= 6 ? 1 : 0)) return true;
+        }
     }
     return false;
 }

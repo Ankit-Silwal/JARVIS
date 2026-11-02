@@ -137,7 +137,7 @@ static void test_edit_distance(void)
      * returns 3, not 2. Callers only test `<= limit`, so behaviour is OK. */
     int d = edit_distance(L"xab", 3, L"abyy", 4, 1);
     CHECKF(d > 1, "xab/abyy over limit 1 must be > limit (got %d)", d);
-    WARN(d == 2, "KNOWN BUG: edit_distance(\"xab\",\"abyy\",limit=1) should return limit+1=2");
+    CHECK(d == 2, "edit_distance(\"xab\",\"abyy\",limit=1) should return limit+1=2");
 }
 
 static void test_path_name(void)
@@ -190,7 +190,7 @@ static void test_utf8(void)
      * locale, which only folds ASCII. "\u00c9" (E-acute) stays upper case,
      * so a file named "R\u00c9SUM\u00c9.pdf" is not found by a spoken "r\u00e9sum\u00e9". */
     str_copy(s, 32, L"\u00c9T\u00c9"); str_lower(s);
-    WARN(str_eq(s, L"\u00e9t\u00e9"), "KNOWN BUG: str_lower does not lowercase non-ASCII (E-acute)");
+    CHECK(str_eq(s, L"\u00e9t\u00e9"), "str_lower does not lowercase non-ASCII (E-acute)");
 }
 
 int wmain(void)

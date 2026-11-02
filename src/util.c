@@ -1,11 +1,44 @@
-/* Small string / path helpers. */
+﻿/* Small string / path helpers. */
 #include "jarvis.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <stdarg.h>
 #include <wctype.h>
 
-void str_lower(wchar_t *s) { for (; *s; s++) *s = (wchar_t)towlower(*s); }
+/* Unicode-aware (towlower only folds ASCII in the "C" locale) */
+void str_lower(wchar_t *s) { size_t n = wcslen(s); if (n) CharLowerBuffW(s, (DWORD)n); }
+
+static wchar_t lower_ch(wchar_t c) { CharLowerBuffW(&c, 1); return c; }
+static bool alnum_ch(wchar_t c) { return c < 128 ? (iswalnum(c) != 0) : (IsCharAlphaNumericW(c) != 0); }
+
+/* Rough "sounds like" key for speech mistakes: physics / fizzics -> fisiks.
+ * Input is lowercase. Only used as a fallback in fuzzy matching. */
+int phonetic_key(const wchar_t *w, int len, wchar_t *out, int cap)
+{
+    int n = 0;
+    for (int i = 0; i < len && n < cap - 2; i++) {
+        wchar_t c = w[i], nx = i + 1 < len ? w[i + 1] : 0;
+        wchar_t o1 = c, o2 = 0;
+        switch (c) {
+        case L'p': if (nx == L'h') { o1 = L'f'; i++; } break;
+        case L'c': if (nx == L'k') { o1 = L'k'; i++; }
+                   else if (nx == L'e' || nx == L'i' || nx == L'y') o1 = L's';
+                   else o1 = L'k';
+                   break;
+        case L'q': o1 = L'k'; break;
+        case L'x': o1 = L'k'; o2 = L's'; break;
+        case L'z': o1 = L's'; break;
+        case L'y': o1 = L'i'; break;
+        case L'w': if (nx == L'h') i++; break;
+        case L'k': if (i == 0 && nx == L'n') continue; break;
+        default: break;
+        }
+        if (!n || out[n - 1] != o1) out[n++] = o1;
+        if (o2 && out[n - 1] != o2) out[n++] = o2;
+    }
+    out[n] = 0;
+    return n;
+}
 
 void str_trim(wchar_t *s)
 {
@@ -99,12 +132,12 @@ int tokenize(const wchar_t *s, Token *out, int max)
 {
     int n = 0;
     while (*s && n < max) {
-        while (*s && !iswalnum(*s)) s++;
+        while (*s && !alnum_ch(*s)) s++;
         if (!*s) break;
         int len = 0;
         Token *t = &out[n];
-        while (*s && iswalnum(*s)) {
-            if (len < 63) t->w[len++] = (wchar_t)towlower(*s);
+        while (*s && alnum_ch(*s)) {
+            if (len < 63) t->w[len++] = lower_ch(*s);
             s++;
         }
         t->w[len] = 0;
@@ -140,7 +173,7 @@ int edit_distance(const wchar_t *a, int la, const wchar_t *b, int lb, int limit)
         if (rowmin > limit) return limit + 1;
         memcpy(prev, cur, sizeof(int) * (lb + 1));
     }
-    return prev[lb];
+    return prev[lb] > limit ? limit + 1 : prev[lb];
 }
 
 char *utf8_from_wide(const wchar_t *w)
