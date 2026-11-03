@@ -953,8 +953,10 @@ static void apply_result(CmdResult *r)
         /* stay open: only an explicit "close" / "exit" ends JARVIS */
         if (r->quit) schedule_close(spoke);
         else if (g.close_pending) cancel_close();
-    } else if (r->close || (g.bg && !r->listen_again)) {
-        schedule_close(spoke);   /* hidden and nothing more to do: exit after replying */
+    } else if (r->close || (g.bg && !r->listen_again && !docs_busy())) {
+        /* hidden and nothing more to do: exit after replying
+         * (not while a document task runs: its result is still to be told) */
+        schedule_close(spoke);
     } else if (g.close_pending) cancel_close();
     state_changed();
 }
@@ -1310,6 +1312,14 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
     case WM_APP_NORMAL:
         go_normal();
         return 0;
+    case WM_APP_TASK:   /* a document task (convert, split...) finished */
+        if (l) {
+            static CmdResult tr;
+            cmd_task_done((const DocResult *)l, &tr);
+            free((void *)l);
+            if (!g.closing && !g.busy) apply_result(&tr);
+        }
+        return 0;
     case WM_APP_RUN:
         if (l) {
             wchar_t *t = (wchar_t *)l;
@@ -1494,6 +1504,7 @@ bool ui_create(HINSTANCE inst, HWND dialog, bool listen, const wchar_t *initial_
                              g.work.left + 10, g.work.top + 10, 100, 100,
                              NULL, NULL, inst, NULL);
     if (!g.hwnd) return false;
+    cmd_set_notify(g.hwnd);   /* document tasks report back with WM_APP_TASK */
     g.dpi = GetDpiForWindow(g.hwnd);
     if (!g.dpi) g.dpi = 96;
 

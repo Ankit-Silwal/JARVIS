@@ -66,6 +66,33 @@ Talk after the mic dot turns blue. Short commands work best.
 | "find physics notes" | Shows a numbered list of matches. Say **"two"** (or "number two") to open #2 |
 | "show resume in folder" | Opens Explorer with the file selected |
 
+### Documents
+
+Everyday file jobs. Select a file in Explorer (or on the Desktop) **then** press the Copilot key and say
+"this", or name the file. "it" / "this" also mean the last file JARVIS opened or made.
+
+| Say | What happens |
+|---|---|
+| "convert resume to pdf" / "make this a pdf" / "save this as pdf" | Word, PowerPoint, Excel, text or image file → PDF |
+| "convert physics notes to word" / "pdf to word resume" | PDF → editable `.docx` (Word's PDF reflow) |
+| "convert this doc to pdf **named** final report" | Picks the output name (also "name it X", "call it X", "as X") |
+| "split physics notes at page 5" | `physics notes part 1.pdf` (pages 1-5) and `part 2.pdf` (6 to the end). Also "up to / until / after page five", "into two parts at page 5" |
+| "split this at page 5 **and save it in downloads**" | Puts the output in another folder ("put it in desktop", "save to documents", or any folder name) |
+| "extract pages 3 to 7 from notes" / "take pages 2-4 of this pdf" | Those pages as a new PDF |
+| "merge notes and homework" / "merge these" | One PDF (`notes merged.pdf`); "merge these" uses every selected PDF |
+| "how many pages does this have" | Counts the pages |
+| "rename this to final report" | Renames (the extension is kept if you don't say one) |
+| "move this to downloads" / "copy resume to desktop" | Moves / copies the file |
+| "delete this" / "remove resume" | Asks "Move it to the Recycle Bin?" - say **yes** or **no**. Always the Recycle Bin, never permanent. Drives and your main folders are refused |
+
+- Nothing is ever overwritten: if `report.pdf` exists the new one is `report (2).pdf`.
+- When JARVIS isn't sure which file you mean it shows a list: say **"two"** and the job runs on #2.
+- Conversions use Microsoft Office in the background (a hidden copy that is closed afterwards; your open
+  Word windows are not touched). Split / extract / merge / page count use Python with PyMuPDF
+  (`pip install pymupdf`); JARVIS finds Anaconda or python.org installs, or set `python=` under `[docs]`.
+- Long jobs run in the background: JARVIS says "Converting…" and tells you when it's done, with the
+  new file in the list (say "one" to open it).
+
 ### Upload / Open dialogs
 
 Open the Upload window first (for example "Upload file" on Google Drive in Chrome), **then** press the Copilot key.
@@ -127,6 +154,7 @@ Names on the left are what you **say** (lowercase). Delete the file to get the d
 | `[sites]` | spoken name = website |
 | `[apps]` | spoken name = program, `ms-settings:` link, etc. |
 | `[folders]` | spoken name = folder |
+| `[docs]` | `python` = python.exe with PyMuPDF for PDF split / merge (empty = find it) |
 
 Examples - add your own:
 
@@ -208,6 +236,7 @@ left-click the icon to show the bar, or right-click it for **Show** / **Exit**. 
 | `src/search.c` | File index + fuzzy search, Start Menu app search |
 | `src/voice.c` | Offline speech recognition and text-to-speech (SAPI) on its own thread |
 | `src/dialog.c` | Detects Upload/Open dialogs and fills in the file path |
+| `src/docs.c` | Document jobs (Office COM, Python + PyMuPDF), file ops, Explorer selection |
 | `src/config.c` | Loads `jarvis.ini` (creates it with defaults on first run) |
 | `src/util.c` | String, path and log helpers |
 | `res/` | Manifest, version info |
@@ -220,6 +249,9 @@ left-click the icon to show the bar, or right-click it for **Show** / **Exit**. 
 build.bat     :: builds build\jarvis.exe
 test.bat      :: runs the tests
 ```
+
+`test.bat` skips the slow real document test (Word, Excel, PyMuPDF on throwaway files in `%TEMP%`);
+run it with `set JARVIS_DOCS_TEST=1` first.
 
 Needs MinGW-w64 `gcc` + `windres` on PATH. Uses only Windows system libraries, no other dependencies.
 
