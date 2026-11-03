@@ -1,8 +1,13 @@
 /* JARVIS entry point.
  *
- *   jarvis.exe                    open the overlay and start listening
- *   jarvis.exe --type             open the overlay without listening
+ *   jarvis.exe                    open the search bar and start listening
+ *                                 (or run hidden if jarvis.ini says mode=background)
+ *   jarvis.exe --type             open the search bar without listening
+ *   jarvis.exe --background       no window: just listen, act and talk back
+ *                                 (the bar appears only when you must pick)
+ *   jarvis.exe --normal           show the search bar even if mode=background
  *   jarvis.exe "open downloads"   open the overlay and run that command
+ *                                 (flags may come first: --background "open x")
  *   jarvis.exe --reindex          rebuild the file index and exit
  *   jarvis.exe --search <words>   print matching files to the console (testing)
  *   jarvis.exe --dry-run <words>  print what a command WOULD do (testing)
@@ -113,16 +118,26 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     }
 
     HWND dlg = dialog_detect(fg);
-    bool listen = g_cfg.listen_on_start && !str_eq(mode, L"--type");
+    /* leading --flags, then an optional command */
+    bool type_only = false, background = g_cfg.background;
+    int first = 1;
+    for (; first < argc && argv[first][0] == L'-' && argv[first][1] == L'-'; first++) {
+        if (str_eq(argv[first], L"--type"))            { type_only = true; background = false; }
+        else if (str_eq(argv[first], L"--background")) background = true;
+        else if (str_eq(argv[first], L"--normal"))     background = false;
+    }
+    bool listen = g_cfg.listen_on_start && !type_only;
     wchar_t initial[1024] = L"";
-    if (argc > 1 && mode[0] != L'-') join_args(argc, argv, 1, initial, 1024);
+    join_args(argc, argv, first, initial, 1024);
+    str_trim(initial);
     if (initial[0]) listen = false;
 
     search_init();
     cmd_init(dlg);
-    log_line(L"start%ls%ls", dlg ? L" (file dialog detected)" : L"", initial[0] ? L" with command" : L"");
+    log_line(L"start%ls%ls%ls", background ? L" (background)" : L"",
+             dlg ? L" (file dialog detected)" : L"", initial[0] ? L" with command" : L"");
 
-    if (!ui_create(inst, dlg, listen, initial[0] ? initial : NULL)) return 1;
+    if (!ui_create(inst, dlg, listen, initial[0] ? initial : NULL, background)) return 1;
     int rc = ui_loop();
     LocalFree(argv);
     return rc;
