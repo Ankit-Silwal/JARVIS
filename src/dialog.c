@@ -61,9 +61,10 @@ bool dialog_fill(HWND dlg, const wchar_t *path)
     if (fgt && fgt != me) AttachThreadInput(me, fgt, FALSE);
 
     /* paths with spaces must be quoted or the dialog treats them as a list */
-    wchar_t text[MAX_PATH + 4];
-    if (wcschr(path, L' ')) swprintf(text, MAX_PATH + 4, L"\"%ls\"", path);
-    else str_copy(text, MAX_PATH + 4, path);
+    /* (sized for [folders] values from the ini, which can exceed MAX_PATH) */
+    wchar_t text[1100];
+    if (wcschr(path, L' ')) swprintf(text, 1100, L"\"%ls\"", path);
+    else str_copy(text, 1100, path);
 
     DWORD_PTR res;
     if (!SendMessageTimeoutW(edit, WM_SETTEXT, 0, (LPARAM)text, SMTO_ABORTIFHUNG, 1500, &res))

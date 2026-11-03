@@ -85,16 +85,28 @@ static void join_words(wchar_t w[][64], int from, int to, wchar_t *out, size_t c
     }
 }
 
-/* "google drive" -> "Google Drive" (for replies) */
+/* "google drive" -> "Google Drive", "vs code" -> "VS Code" (for replies) */
 static void title_case(const wchar_t *in, wchar_t *out, size_t cap)
 {
-    str_copy(out, cap, in);
-    if (wcslen(out) > 100) out[100] = 0;
-    bool start = true;
-    for (wchar_t *p = out; *p; p++) {
-        if (start && iswalpha(*p)) *p = (wchar_t)towupper(*p);
-        start = (*p == L' ');
+    static const wchar_t *const SPECIAL[][2] = {
+        {L"vs", L"VS"}, {L"pdf", L"PDF"}, {L"ppt", L"PPT"}, {L"pc", L"PC"}, {L"usb", L"USB"},
+        {L"ai", L"AI"}, {L"cmd", L"CMD"}, {L"wifi", L"Wi-Fi"}, {L"wi-fi", L"Wi-Fi"}, {L"vscode", L"VS Code"},
+        {L"youtube", L"YouTube"}, {L"github", L"GitHub"}, {L"chatgpt", L"ChatGPT"}, {L"linkedin", L"LinkedIn"},
+        {L"whatsapp", L"WhatsApp"}, {L"onedrive", L"OneDrive"}, {L"powerpoint", L"PowerPoint"},
+        {L"powershell", L"PowerShell"},
+    };
+    wchar_t w[24][64];
+    int n = split_words(in, w, 24);
+    out[0] = 0;
+    for (int i = 0; i < n; i++) {
+        const wchar_t *word = w[i];
+        for (size_t k = 0; k < sizeof SPECIAL / sizeof SPECIAL[0]; k++)
+            if (str_eq(w[i], SPECIAL[k][0])) { word = SPECIAL[k][1]; break; }
+        if (word == w[i] && iswalpha(w[i][0])) w[i][0] = (wchar_t)towupper(w[i][0]);
+        if (i) str_cat(out, cap, L" ");
+        str_cat(out, cap, word);
     }
+    if (wcslen(out) > 100) out[100] = 0;
 }
 
 static void reply(CmdResult *r, const wchar_t *fmt, ...)
@@ -146,14 +158,19 @@ static WList TRAIL_FILLERS = { L"please", L"for me", L"right now", L"now", L"tha
  * what's), collapse spaces, join "x dot com", strip filler words. */
 static void normalize(const wchar_t *in, wchar_t *out, size_t cap)
 {
-    wchar_t tmp[S_CAP];
+    wchar_t tmp[S_CAP], low[S_CAP];
     size_t n = 0;
-    for (size_t i = 0; in[i] && n + 1 < S_CAP; i++) {
-        wchar_t c = (wchar_t)towlower(in[i]);
+    /* towlower() only folds ASCII; ini keys are lowered with CharLowerBuff too */
+    str_copy(low, S_CAP, in);
+    str_lower(low);
+    for (size_t i = 0; low[i] && n + 1 < S_CAP; i++) {
+        wchar_t c = low[i];
         if (iswalnum(c)) tmp[n++] = c;
         else if (wcschr(L".:/-_'\\+#&", c) && n && tmp[n - 1] != L' ' &&
-                 (iswalnum(in[i + 1]) || in[i + 1] == L'/' || in[i + 1] == L'\\'))
+                 (iswalnum(low[i + 1]) || low[i + 1] == L'/' || low[i + 1] == L'\\'))
             tmp[n++] = c;
+        else if (c == L':' && n && iswalpha(tmp[n - 1]) && (n == 1 || tmp[n - 2] == L' '))
+            tmp[n++] = c;                 /* typed drive: "open c:" */
         else tmp[n++] = L' ';
     }
     tmp[n] = 0;
@@ -335,6 +352,16 @@ static bool act_app(const wchar_t *val)
     record(L"APP %ls", val);
     if (s_dry) return true;
     return shell_open(exe, args[0] ? args : NULL);
+}
+
+/* Start Menu shortcut (.lnk/.url/.appref-ms): a full path, never split into
+ * program + arguments ("Game - Deluxe.url" would be cut at " -"). */
+static bool act_shortcut(const wchar_t *path)
+{
+    if (!path_exists(path)) return false;
+    record(L"APP %ls", path);
+    if (s_dry) return true;
+    return shell_open(path, NULL);
 }
 
 /* ------------------------------------------------------------ url helpers */
@@ -542,13 +569,27 @@ static void show_list(const Hit *hits, int n, PickMode mode, CmdResult *r)
     record(L"LIST %d", n);
 }
 
+/* The index can be up to index_max_age_min old: a hit may have been moved or
+ * deleted since. Says so (and refreshes the index) instead of failing silently. */
+static bool hit_missing(const wchar_t *path, const wchar_t *nm, CmdResult *r)
+{
+    if (is_shell_path(path) || path_exists(path)) return false;
+    reply(r, L"%ls seems to have been moved or deleted. Refreshing my index.", nm);
+    record(L"SAY");
+    search_rebuild_async();
+    s_nrows = 0;
+    return true;
+}
+
 /* Open a resolved file or folder (into the dialog when one is active). */
 static void deliver(const wchar_t *path, CmdResult *r)
 {
     wchar_t nm[128];
     short_name(path, nm, 128);
+    if (hit_missing(path, nm, r)) return;
     if (dialog_active() && act_dialog(path)) reply(r, L"Selected %ls.", nm);
-    else { act_open(path); reply(r, L"Opening %ls.", nm); }
+    else if (act_open(path)) reply(r, L"Opening %ls.", nm);
+    else { reply(r, L"I couldn't open %ls.", nm); return; }
     done(r);
 }
 
@@ -591,6 +632,7 @@ static void do_files(const wchar_t *display, const FileQ *q, FileMode mode, bool
     case FM_REVEAL: {
         wchar_t nm[128];
         short_name(hits[0].path, nm, 128);
+        if (hit_missing(hits[0].path, nm, r)) return;
         act_reveal(hits[0].path);
         reply(r, L"Here's %ls.", nm);
         done(r);
@@ -685,13 +727,27 @@ static void web_search(int engine, const wchar_t *q, CmdResult *r)
 }
 
 /* --------------------------------------------------------- name resolution */
+/* Display name for a config hit: the key that matched ("calculator app" -> "Calculator") */
+static void config_disp(const wchar_t *name, const KVList *l, const wchar_t *const *suffixes, wchar_t *disp)
+{
+    wchar_t t[256];
+    str_copy(t, 256, name);
+    if (!kv_get(l, t))
+        for (; *suffixes; suffixes++) {
+            str_copy(t, 256, name);
+            if (cut_suffix(t, *suffixes) && t[0] && kv_get(l, t)) break;
+            str_copy(t, 256, name);
+        }
+    title_case(t, disp, 128);
+}
+
 /* Configured site / app / folder with exactly this name. */
 static bool try_config(const wchar_t *name, CmdResult *r)
 {
     wchar_t disp[128];
-    title_case(name, disp, 128);
     const wchar_t *v;
     if ((v = site_url(name))) {
+        config_disp(name, &g_cfg.sites, SITE_SUFFIX, disp);
         act_url(v);
         reply(r, L"Opening %ls.", disp);
         done(r);
@@ -699,8 +755,9 @@ static bool try_config(const wchar_t *name, CmdResult *r)
     }
     if ((v = app_target(name))) {
         wchar_t lnk[MAX_PATH], an[128];
+        config_disp(name, &g_cfg.apps, APP_SUFFIX, disp);
         if (act_app(v)) reply(r, L"Opening %ls.", disp);
-        else if (search_app(name, lnk, an) >= 65) { act_app(lnk); reply(r, L"Opening %ls.", an); }
+        else if (search_app(name, lnk, an) >= 65 && act_shortcut(lnk)) reply(r, L"Opening %ls.", an);
         else {
             reply(r, L"I couldn't find %ls on this PC.", disp);
             record(L"SAY");
@@ -710,6 +767,7 @@ static bool try_config(const wchar_t *name, CmdResult *r)
         return true;
     }
     if ((v = folder_path(name)) && (is_shell_path(v) || path_is_dir(v))) {
+        config_disp(name, &g_cfg.folders, FOLDER_SUFFIX, disp);
         if (dialog_active() && act_dialog(v)) reply(r, L"Going to %ls.", disp);
         else { act_open(v); reply(r, L"Opening %ls.", disp); }
         done(r);
@@ -757,8 +815,7 @@ static void resolve_open(const wchar_t *rest, bool play, CmdResult *r)
     build_query(name, &fq, 0);
     if (!fq.typed) {
         wchar_t lnk[MAX_PATH], an[128];
-        if (search_app(name, lnk, an) >= 80) {
-            act_app(lnk);
+        if (search_app(name, lnk, an) >= 80 && act_shortcut(lnk)) {
             reply(r, L"Opening %ls.", an);
             done(r);
             return;
@@ -785,8 +842,9 @@ static void resolve_upload(const wchar_t *rest, CmdResult *r)
 {
     wchar_t name[256];
     strip_articles(rest, name, 256);
-    const wchar_t *v = folder_path(name);
-    if (dialog_active() && v) { try_config(name, r); return; }
+    /* (a configured folder that doesn't exist falls through to a file search
+     * instead of returning with no reply at all) */
+    if (dialog_active() && folder_path(name) && try_config(name, r)) return;
     FileQ fq;
     build_query(name, &fq, 0);
     do_files(name, &fq, FM_UPLOAD, false, r);
@@ -947,14 +1005,17 @@ void cmd_pick(const Row *row, PickMode mode, CmdResult *r)
     Row rw = *row;                          /* row may point into s_rows */
     wchar_t nm[128];
     short_name(rw.hit.path, nm, 128);
+    if (hit_missing(rw.hit.path, nm, r)) return;
     if (mode == PICK_REVEAL) {
         act_reveal(rw.hit.path);
         reply(r, L"Here's %ls.", nm);
     } else if (mode == PICK_DIALOG && dialog_active() && act_dialog(rw.hit.path)) {
         reply(r, L"Selected %ls.", nm);
-    } else {
-        act_open(rw.hit.path);
+    } else if (act_open(rw.hit.path)) {
         reply(r, L"Opening %ls.", nm);
+    } else {
+        reply(r, L"I couldn't open %ls.", nm);
+        return;
     }
     done(r);
 }
@@ -1036,6 +1097,19 @@ void cmd_run(const wchar_t *text, CmdResult *r)
         bool reveal;
         int n = parse_pick(s, &reveal);
         if (n) { cmd_pick(&s_rows[n - 1], reveal ? PICK_REVEAL : s_mode, r); return; }
+    }
+    /* a bare "two" / "number 3" with no list up: don't search files named "2" */
+    {
+        wchar_t t[S_CAP];
+        str_copy(t, S_CAP, s);
+        cut_prefixes(t, (WList){ L"number", L"no", L"num", L"option", L"the", NULL });
+        if (!str_eq(t, L"one")) cut_suffix(t, L"one");
+        if (t[0] && !wcschr(t, L' ') && number_word(t) > 0) {
+            reply(r, s_nrows ? L"There's no number %ls in the list." : L"There's no list to pick from yet.", t);
+            record(L"SAY");
+            r->listen_again = true;
+            return;
+        }
     }
     if (run_fixed(s, r)) return;
 

@@ -39,23 +39,25 @@ static int run_console(const wchar_t *mode, const wchar_t *text)
 {
     /* GUI app: borrow the parent console if started from a terminal */
     AttachConsole(ATTACH_PARENT_PROCESS);
-    search_init();
-    search_wait(120000);
-    wchar_t line[MAX_PATH + 64];
+    wchar_t line[3000];   /* an action (URL) can be ~2400 chars */
 
     if (str_eq(mode, L"--reindex")) {
+        /* no search_init(): with a stale index it would scan everything once
+         * in the background and then we'd scan it all again */
         search_rebuild_async();
         search_wait(600000);
-        swprintf(line, MAX_PATH + 64, L"indexed %d files and folders\n", search_count());
+        swprintf(line, 3000, L"indexed %d files and folders\n", search_count());
         console_out(line);
         return 0;
     }
+    search_init();
+    search_wait(120000);
     if (str_eq(mode, L"--search")) {
         Hit hits[MAX_HITS];
         SearchQuery q = { .text = text };
         int n = search_files(&q, hits, MAX_HITS);
         for (int i = 0; i < n; i++) {
-            swprintf(line, MAX_PATH + 64, L"%3d  %ls\n", hits[i].score, hits[i].path);
+            swprintf(line, 3000, L"%3d  %ls\n", hits[i].score, hits[i].path);
             console_out(line);
         }
         if (!n) console_out(L"no matches\n");
@@ -66,11 +68,11 @@ static int run_console(const wchar_t *mode, const wchar_t *text)
     CmdResult r;
     memset(&r, 0, sizeof r);
     cmd_run(text, &r);
-    swprintf(line, MAX_PATH + 64, L"action: %ls\nreply:  %ls\n", cmd_last_action(), r.reply);
+    swprintf(line, 3000, L"action: %ls\nreply:  %ls\n", cmd_last_action(), r.reply);
     console_out(line);
     for (int i = 0; i < r.nrows; i++) {
         const Row *row = &r.rows[i];
-        swprintf(line, MAX_PATH + 64, L"  %d. %ls\n", i + 1, row->kind == ROW_HIT ? row->hit.path : row->title);
+        swprintf(line, 3000, L"  %d. %ls\n", i + 1, row->kind == ROW_HIT ? row->hit.path : row->title);
         console_out(line);
     }
     return 0;

@@ -260,7 +260,11 @@ void config_load(void)
     g_cfg.close_delay_ms = read_int(L"general", L"close_delay_ms", 1100);
     g_cfg.index_max_age_min = read_int(L"general", L"index_max_age_min", 30);
     read_str(L"general", L"voice", L"David", g_cfg.voice_name, 64);
-    read_str(L"general", L"browser", L"chrome.exe", g_cfg.browser, MAX_PATH);
+    {
+        wchar_t b[MAX_PATH];   /* %LOCALAPPDATA%\...\browser.exe like the [apps] values */
+        read_str(L"general", L"browser", L"chrome.exe", b, MAX_PATH);
+        expand_env(b, g_cfg.browser, MAX_PATH);
+    }
 
     /* built-in folders (spoken name -> path); [folders] in the ini can add/override */
     wchar_t p[MAX_PATH];
