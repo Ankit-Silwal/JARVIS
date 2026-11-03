@@ -497,6 +497,24 @@ static bool word_convert(const wchar_t *src, const wchar_t *dst, int fmt)
     bool ok = false;
     IDispatch *docs = NULL, *doc = NULL;
     disp_put(o.app, L"DisplayAlerts", v_int(0));            /* wdAlertsNone */
+    /* Opening a PDF shows "Word will now convert your PDF..." even with alerts
+     * off; Word's own option to skip it is switched on just for this open. */
+    HKEY key = NULL;
+    DWORD old = 0, oldsz = sizeof old;
+    bool had = false;
+    if (_wcsicmp(ext_of(src), L"pdf") == 0) {
+        VARIANT ver;
+        if (SUCCEEDED(disp_call(o.app, DISPATCH_PROPERTYGET, L"Version", &ver, 0, NULL)) && ver.vt == VT_BSTR && ver.bstrVal) {
+            wchar_t kp[160];
+            swprintf(kp, 160, L"Software\\Microsoft\\Office\\%ls\\Word\\Options", ver.bstrVal);
+            if (RegCreateKeyExW(HKEY_CURRENT_USER, kp, 0, NULL, 0, KEY_QUERY_VALUE | KEY_SET_VALUE, NULL, &key, NULL) == ERROR_SUCCESS) {
+                had = RegQueryValueExW(key, L"DisableConvertPdfWarning", NULL, NULL, (BYTE *)&old, &oldsz) == ERROR_SUCCESS;
+                DWORD one = 1;
+                RegSetValueExW(key, L"DisableConvertPdfWarning", 0, REG_DWORD, (const BYTE *)&one, sizeof one);
+            } else key = NULL;
+        }
+        VariantClear(&ver);
+    }
     docs = disp_get(o.app, L"Documents");
     if (docs) {
         /* Open(FileName, ConfirmConversions, ReadOnly, AddToRecentFiles,
@@ -507,6 +525,11 @@ static bool word_convert(const wchar_t *src, const wchar_t *dst, int fmt)
                           v_miss(), v_miss(), v_miss(), v_bool(false) };
         doc = disp_method_obj(docs, L"Open", 12, a);
         clear_args(a, 12);
+    }
+    if (key) {
+        if (had) RegSetValueExW(key, L"DisableConvertPdfWarning", 0, REG_DWORD, (const BYTE *)&old, sizeof old);
+        else RegDeleteValueW(key, L"DisableConvertPdfWarning");
+        RegCloseKey(key);
     }
     if (doc) {
         if (fmt == 17) {
@@ -752,7 +775,7 @@ bool docs_run(const DocTask *t, DocResult *r)
         if (!path_exists(t->src[i])) {
             wchar_t n0[128];
             nm(t->src[i], n0);
-            say(r, L"I can't find %ls any more.", n0);
+            say(r, L"I can't find %ls.", n0);
             return false;
         }
     switch (t->op) {
