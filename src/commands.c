@@ -21,6 +21,10 @@ static wchar_t  s_action[ACT_CAP];      /* last action (dry-run format) */
 static Row      s_rows[MAX_HITS];       /* rows of the last list, for "number two" */
 static int      s_nrows;
 static PickMode s_mode;
+static wchar_t  s_last[MAX_PATH];       /* last file opened / listed / produced ("it") */
+static wchar_t  s_sel[DOC_MAX_SRC][MAX_PATH];   /* Explorer selection at start ("this") */
+static int      s_nsel;
+static void set_last(const wchar_t *p);
 
 typedef const wchar_t *const WList[];   /* NULL-terminated word/phrase list */
 
@@ -562,6 +566,7 @@ static void show_list(const Hit *hits, int n, PickMode mode, CmdResult *r)
     }
     s_nrows = n;
     s_mode = mode;
+    if (n == 1) set_last(hits[0].path);
     r->pick_mode = mode;
     r->rows_replace = true;
     r->listen_again = true;
@@ -590,6 +595,7 @@ static void deliver(const wchar_t *path, CmdResult *r)
     if (dialog_active() && act_dialog(path)) reply(r, L"Selected %ls.", nm);
     else if (act_open(path)) reply(r, L"Opening %ls.", nm);
     else { reply(r, L"I couldn't open %ls.", nm); return; }
+    set_last(path);
     done(r);
 }
 
@@ -634,6 +640,7 @@ static void do_files(const wchar_t *display, const FileQ *q, FileMode mode, bool
         short_name(hits[0].path, nm, 128);
         if (hit_missing(hits[0].path, nm, r)) return;
         act_reveal(hits[0].path);
+        set_last(hits[0].path);
         reply(r, L"Here's %ls.", nm);
         done(r);
         return;
@@ -801,9 +808,12 @@ static bool try_drive_or_url(const wchar_t *name, CmdResult *r)
 }
 
 /* "open X" / bare "X" */
+static bool open_ref(const wchar_t *phrase, bool reveal, CmdResult *r);
+
 static void resolve_open(const wchar_t *rest, bool play, CmdResult *r)
 {
     wchar_t name[256];
+    if (open_ref(rest, false, r)) return;   /* "open this" = the selected / last file */
     strip_articles(rest, name, 256);
     if (!name[0]) { reply(r, L"What should I open?"); record(L"SAY"); r->listen_again = true; return; }
     if (try_config(name, r)) return;
@@ -895,13 +905,13 @@ static void show_help(CmdResult *r)
 {
     static const wchar_t *H[][2] = {
         {L"open downloads", L"Open a folder, app or website"},
-        {L"open latest photo", L"Open your newest file of a kind"},
-        {L"find resume", L"Search your files"},
+        {L"find resume, open latest photo", L"Search your files"},
         {L"upload resume pdf", L"Fill an Upload / Open window"},
         {L"google black holes", L"Search the web, YouTube, Wikipedia, maps"},
-        {L"show essay in folder", L"Show a file in Explorer"},
-        {L"what time is it", L"Time, date and battery"},
-        {L"volume up, mute, lock", L"Control your PC"},
+        {L"convert resume to pdf", L"PDF \x2194 Word, slides, sheets, images"},
+        {L"split physics notes at page 5 and save it in downloads", L"Split, extract pages, merge PDFs"},
+        {L"rename this to final report", L"Rename, move, copy, delete selected files"},
+        {L"what time is it, volume up, lock", L"Time, date, battery and your PC"},
     };
     int n = (int)(sizeof H / sizeof H[0]);
     if (n > MAX_HITS) n = MAX_HITS;
@@ -986,6 +996,810 @@ static int parse_pick(const wchar_t *s, bool *reveal)
     return n >= 1 && n <= s_nrows ? n : 0;
 }
 
+/* ---------------------------------------------------------- document tasks
+ * "convert resume to pdf", "split notes at page 5 and save it in downloads",
+ * "merge these", "rename this to final report", "delete it" ...
+ * A Plan holds the spoken file names; they are resolved one by one (a list
+ * is shown when unsure and the plan waits for "two"), then the task runs. */
+typedef struct {
+    DocOp   op;                          /* DOC_NONE = convert, direction from the file type */
+    int     nfile;
+    wchar_t q[DOC_MAX_SRC][160];         /* spoken name ("" once resolved) */
+    wchar_t path[DOC_MAX_SRC][MAX_PATH];
+    wchar_t name[160];                   /* "name it X" / rename target */
+    wchar_t folder[MAX_PATH];            /* "save it in X" (resolved) */
+    int     a, b;
+} Plan;
+
+/* is dir an ancestor of (or the same as) p? */
+static bool is_parent_of_path(const wchar_t *dir, const wchar_t *p)
+{
+    size_t n = wcslen(dir);
+    while (n > 3 && dir[n - 1] == L'\\') n--;
+    return _wcsnicmp(dir, p, n) == 0 && (p[n] == 0 || p[n] == L'\\');
+}
+
+static Plan    s_plan;                   /* waiting for a pick from the list */
+static bool    s_plan_wait;
+static bool    s_del_wait;               /* asked "move X to the Recycle Bin?" */
+static wchar_t s_del[MAX_PATH];
+static HWND    s_notify;
+static wchar_t s_orig[S_CAP];            /* the command as typed (for name casing) */
+
+static void set_last(const wchar_t *p)
+{
+    if (!p || !p[0] || is_shell_path(p)) return;
+    str_copy(s_last, MAX_PATH, p);
+    s_nsel = 0;     /* "it" now means what we just did, not the old selection */
+}
+
+static WList REF_W = { L"this", L"that", L"it", L"these", L"those", L"them", L"selected", L"current", NULL };
+static WList REF_FILL = { L"file", L"files", L"doc", L"docs", L"document", L"documents", L"one", L"ones",
+    L"pdf", L"pdfs", L"thing", L"item", L"items", L"the", L"selection", L"word", L"presentation", L"slides",
+    L"sheet", L"spreadsheet", L"image", L"photo", L"picture", L"folder", L"two", L"all", L"of", L"both", NULL };
+
+/* "this", "this pdf", "these files", "it" -> true (plural for these/those/them/files) */
+static bool is_ref(const wchar_t *phrase, ExtClass *hint)
+{
+    wchar_t w[12][64];
+    int n = split_words(phrase, w, 12);
+    bool ref = false;
+    if (hint) *hint = EXT_ANY;
+    if (!n) return false;
+    for (int i = 0; i < n; i++) {
+        if (in_list(w[i], REF_W)) { ref = true; continue; }
+        if (!in_list(w[i], REF_FILL)) return false;
+        ExtClass e = type_word(w[i]);
+        if (e && hint) *hint = e;
+    }
+    return ref;
+}
+
+/* can this op work on that file? */
+static bool op_accepts(DocOp op, const wchar_t *p)
+{
+    ExtClass e = ext_class_of(p);
+    bool dir = path_is_dir(p);
+    switch (op) {
+    case DOC_TO_PDF:
+        return !dir && (e == EXT_DOC || e == EXT_PPT || e == EXT_SHEET || e == EXT_IMAGE ||
+                        _wcsicmp(PathFindExtensionW(p), L".txt") == 0);
+    case DOC_NONE:
+        return op_accepts(DOC_TO_PDF, p) || (!dir && e == EXT_PDF);
+    case DOC_TO_DOCX: case DOC_SPLIT: case DOC_EXTRACT: case DOC_MERGE: case DOC_PAGES:
+        return !dir && e == EXT_PDF;
+    default:
+        return true;
+    }
+}
+
+static ExtClass op_ext(DocOp op)
+{
+    return (op == DOC_TO_DOCX || op == DOC_SPLIT || op == DOC_EXTRACT || op == DOC_MERGE || op == DOC_PAGES)
+           ? EXT_PDF : EXT_ANY;
+}
+
+/* "this" -> selected files (that fit), else the last file; returns count */
+static int resolve_ref(DocOp op, ExtClass hint, wchar_t (*out)[MAX_PATH], int max)
+{
+    int n = 0;
+    for (int i = 0; i < s_nsel && n < max; i++)
+        if (path_exists(s_sel[i]) && op_accepts(op, s_sel[i]) && (!hint || ext_class_of(s_sel[i]) == hint))
+            str_copy(out[n++], MAX_PATH, s_sel[i]);
+    if (!n && s_last[0] && path_exists(s_last) && op_accepts(op, s_last))
+        str_copy(out[n++], MAX_PATH, s_last);
+    return n;
+}
+
+/* lower-case name -> the casing the user typed, when it is in the original */
+static void orig_case(wchar_t *s)
+{
+    size_t n = wcslen(s);
+    if (!n) return;
+    for (const wchar_t *p = s_orig; *p; p++)
+        if (_wcsnicmp(p, s, n) == 0) { memcpy(s, p, n * sizeof(wchar_t)); return; }
+}
+
+/* file name the user said: no path characters, no format word at the end */
+static void clean_name(const wchar_t *in, wchar_t *out, size_t cap)
+{
+    size_t n = 0;
+    for (const wchar_t *p = in; *p && n + 1 < cap; p++)
+        if (!wcschr(L"<>:\"/\\|?*", *p)) out[n++] = *p;
+    out[n] = 0;
+    str_collapse_spaces(out);
+    cut_prefixes(out, (WList){ L"it", L"them", L"as", L"to", L"the", NULL });
+    static WList FMT = { L"pdf", L"pdf file", L"docx", L"word document", L"word file", L"file", NULL };
+    for (const wchar_t *const *f = FMT; *f; f++) if (wcslen(out) > wcslen(*f) + 1) cut_suffix(out, *f);
+    orig_case(out);
+}
+
+/* split "C:\a\b c.pdf" -> dir "C:\a", base "b c", ext ".pdf" */
+static void path_parts(const wchar_t *p, wchar_t *dir, wchar_t *base, wchar_t *ext)
+{
+    str_copy(dir, MAX_PATH, p);
+    wchar_t *s = wcsrchr(dir, L'\\');
+    const wchar_t *name = s ? s + 1 : dir;
+    str_copy(base, MAX_PATH, name);
+    if (s) *s = 0;
+    if (wcslen(dir) == 2 && dir[1] == L':') str_cat(dir, MAX_PATH, L"\\");
+    ext[0] = 0;
+    wchar_t *d = wcsrchr(base, L'.');
+    if (d && d != base && !path_is_dir(p)) { str_copy(ext, 32, d); *d = 0; }
+}
+
+static void join_path(wchar_t *out, const wchar_t *dir, const wchar_t *name)
+{
+    size_t n = wcslen(dir);
+    swprintf(out, MAX_PATH, n && dir[n - 1] == L'\\' ? L"%ls%ls" : L"%ls\\%ls", dir, name);
+}
+
+/* "downloads", "my desktop folder", "d drive", "c:\x", or a folder search */
+static bool resolve_folder(const wchar_t *text, wchar_t *out)
+{
+    wchar_t t[256];
+    strip_articles(text, t, 256);
+    cut_suffix(t, L"folder");
+    cut_suffix(t, L"directory");
+    if (!t[0]) return false;
+    const wchar_t *f = filter_folder(t);
+    if (!f) { wchar_t t2[256]; swprintf(t2, 256, L"%ls folder", t); f = filter_folder(t2); }
+    if (f && path_is_dir(f)) { str_copy(out, MAX_PATH, f); return true; }
+    if (parse_drive(t, out) && path_is_dir(out)) return true;
+    if (wcschr(t, L'\\') && path_is_dir(t)) { str_copy(out, MAX_PATH, t); return true; }
+    if (!wait_index()) return false;
+    Hit hits[MAX_HITS];
+    SearchQuery sq = { t, NULL, EXT_ANY, SF_DIRS_ONLY };
+    int n = search_files(&sq, hits, MAX_HITS);
+    if (n && hits[0].score >= 60 && path_is_dir(hits[0].path)) { str_copy(out, MAX_PATH, hits[0].path); return true; }
+    return false;
+}
+
+/* ---- parsing helpers on word arrays */
+static bool words_at(wchar_t w[][64], int n, int i, const wchar_t *phrase, int *len)
+{
+    wchar_t p[8][64];
+    int m = split_words(phrase, p, 8);
+    if (i < 0 || i + m > n) return false;
+    for (int k = 0; k < m; k++) if (!str_eq(w[i + k], p[k])) return false;
+    if (len) *len = m;
+    return true;
+}
+
+/* 1..99 from "5", "five", "twenty five", "5th"; returns words used (0 = none).
+ * "to"/"for" are NOT numbers here: "pages three to seven". */
+static int page_num(wchar_t w[][64], int n, int i, int *val)
+{
+    static const wchar_t *U[] = { L"zero", L"one", L"two", L"three", L"four", L"five", L"six", L"seven", L"eight",
+        L"nine", L"ten", L"eleven", L"twelve", L"thirteen", L"fourteen", L"fifteen", L"sixteen", L"seventeen",
+        L"eighteen", L"nineteen" };
+    static const wchar_t *T[] = { L"twenty", L"thirty", L"forty", L"fifty", L"sixty", L"seventy", L"eighty", L"ninety" };
+    if (i >= n) return 0;
+    if (iswdigit(w[i][0])) {
+        const wchar_t *p = w[i];
+        while (iswdigit(*p)) p++;
+        if (*p && !str_eq(p, L"st") && !str_eq(p, L"nd") && !str_eq(p, L"rd") && !str_eq(p, L"th")) return 0;
+        *val = _wtoi(w[i]);
+        return 1;
+    }
+    for (int k = 1; k < 20; k++) if (str_eq(w[i], U[k])) { *val = k; return 1; }
+    for (int k = 0; k < 8; k++)
+        if (str_eq(w[i], T[k])) {
+            *val = 20 + 10 * k;
+            for (int u = 1; u < 10 && i + 1 < n; u++) if (str_eq(w[i + 1], U[u])) { *val += u; return 2; }
+            return 1;
+        }
+    int v = number_word(w[i]);     /* "fifth", "third" ... */
+    if (v > 0 && !in_list(w[i], (WList){ L"to", L"too", L"for", L"won", L"ate", L"tree", NULL })) { *val = v; return 1; }
+    return 0;
+}
+
+static void trim_and(wchar_t w[][64], int *n)
+{
+    while (*n > 0 && in_list(w[*n - 1], (WList){ L"and", L"then", L"also", L"please", NULL })) (*n)--;
+}
+
+/* Pulls "and name it X" / "save it in Y" off the end (any order). Returns
+ * false (with a reply) when the folder can't be found. */
+static bool take_modifiers(wchar_t w[][64], int *n, Plan *p, CmdResult *r)
+{
+    static WList NAME_M = { L"and name it", L"name it", L"and call it", L"call it", L"and name them", L"name them",
+        L"and call them", L"call them", L"as named", L"named", L"and rename it", L"and title it", L"with the name",
+        L"and save it as", L"save it as", L"and save as", L"save as", NULL };
+    static WList DIR_M = { L"and put it in", L"put it in", L"and put them in", L"put them in", L"and put it on",
+        L"put it on", L"and save it in", L"save it in", L"and save it to", L"save it to", L"and save them in",
+        L"save them in", L"and save them to", L"save them to", L"and save to", L"save to", L"and save in",
+        L"save in", L"and save it on", L"save it on", L"and store it in", L"store it in", L"and place it in",
+        L"place it in", L"and keep it in", L"keep it in", L"and put the result in", L"put the result in", NULL };
+    for (;;) {
+        int best = -1, blen = 0;
+        bool bdir = false;
+        for (int pass = 0; pass < 2; pass++)
+            for (const wchar_t *const *m = pass ? DIR_M : NAME_M; *m; m++)
+                for (int i = *n - 2; i >= 1; i--) {
+                    int len;
+                    if (!words_at(w, *n, i, *m, &len) || i + len >= *n) continue;
+                    if (i < best || (i == best && len <= blen)) break;
+                    /* "save as pdf" is a format, not a name */
+                    if (str_starts(*m, L"save") && !pass) {
+                        wchar_t v[128];
+                        join_words(w, i + len, *n, v, 128);
+                        if (in_list(v, (WList){ L"pdf", L"a pdf", L"word", L"a word document", L"docx", L"word document", NULL })) continue;
+                    }
+                    best = i; blen = len; bdir = pass == 1;
+                    break;
+                }
+        if (best < 0) return true;
+        wchar_t v[256];
+        join_words(w, best + blen, *n, v, 256);
+        *n = best;
+        trim_and(w, n);
+        if (bdir) {
+            if (!resolve_folder(v, p->folder)) {
+                wchar_t d[128];
+                str_copy(d, 128, v);
+                reply(r, L"I couldn't find a folder called %ls.", d);
+                record(L"SAY");
+                return false;
+            }
+        } else clean_name(v, p->name, 160);
+    }
+}
+
+/* "this" alone when no file phrase was said */
+static void add_file(Plan *p, const wchar_t *q)
+{
+    if (p->nfile >= DOC_MAX_SRC) return;
+    wchar_t t[160];
+    str_copy(t, 160, q);
+    str_trim(t);
+    if (!t[0]) str_copy(t, 160, L"this");
+    str_copy(p->q[p->nfile++], 160, t);
+}
+
+static const wchar_t *const PDF_T[] = { L"pdf", L"pdf file", L"pdf document", L"pdfs", NULL };
+static const wchar_t *const WORD_T[] = { L"editable word document", L"editable word", L"word document",
+    L"word file", L"word doc", L"word", L"docx", L"doc", L"docs", L"document", NULL };
+
+/* target format at word i ("pdf", "a word document"): DOC_TO_PDF / DOC_TO_DOCX, words used */
+static DocOp target_at(wchar_t w[][64], int n, int i, int *used)
+{
+    int skip = (i < n && (str_eq(w[i], L"a") || str_eq(w[i], L"an"))) ? 1 : 0;
+    int len;
+    for (const wchar_t *const *t = PDF_T; *t; t++)
+        if (words_at(w, n, i + skip, *t, &len)) { *used = skip + len; return DOC_TO_PDF; }
+    for (const wchar_t *const *t = WORD_T; *t; t++)
+        if (words_at(w, n, i + skip, *t, &len)) { *used = skip + len; return DOC_TO_DOCX; }
+    return DOC_NONE;
+}
+
+/* Returns 0: not a document command, 1: plan ready, 2: replied (error / question) */
+static int parse_docs(const wchar_t *s, Plan *p, CmdResult *r)
+{
+    static WList CONVERT_V = { L"convert", L"change", L"turn", L"export", L"save", L"make", L"transform", NULL };
+    static WList SPLIT_V = { L"split", L"divide", L"cut", L"break", L"separate", NULL };
+    static WList EXTRACT_V = { L"extract", L"take", L"pull", L"get", L"save", L"copy", L"take out", L"pull out", NULL };
+    static WList MERGE_V = { L"merge", L"combine", L"join", L"stitch", NULL };
+    static WList DELETE_V = { L"delete", L"remove", L"trash", L"erase", L"recycle", L"bin", NULL };
+    memset(p, 0, sizeof *p);
+    static wchar_t w[48][64];
+    int n = split_words(s, w, 48);
+    if (n == 0) return 0;
+    const wchar_t *v0 = w[0];
+    wchar_t q[256];
+
+    /* ---- page count: "how many pages in X", "page count of X", "count pages in X" */
+    {
+        int st = -1, len;
+        if (words_at(w, n, 0, L"how many pages", &len)) st = len;
+        else if (words_at(w, n, 0, L"count the pages", &len) || words_at(w, n, 0, L"count pages", &len) ||
+                 words_at(w, n, 0, L"page count", &len) || words_at(w, n, 0, L"number of pages", &len)) st = len;
+        if (st >= 0) {
+            while (st < n && in_list(w[st], (WList){ L"are", L"in", L"of", L"does", L"is", L"there", L"has", L"for", NULL })) st++;
+            while (n > st && in_list(w[n - 1], (WList){ L"have", L"has", L"got", L"contain", NULL })) n--;
+            join_words(w, st, n, q, 256);
+            p->op = DOC_PAGES;
+            add_file(p, q);
+            return 1;
+        }
+    }
+
+    bool conv_v = in_list(v0, CONVERT_V), split_v = in_list(v0, SPLIT_V), merge_v = in_list(v0, MERGE_V);
+    bool ren_v = str_eq(v0, L"rename"), move_v = str_eq(v0, L"move"), copy_v = str_eq(v0, L"copy");
+    bool del_v = in_list(v0, DELETE_V);
+    /* "extract pages 2 to 4 from X", "take page 3 of X" */
+    int pg = -1;
+    if (in_list(v0, EXTRACT_V)) {
+        int i = 1;
+        if (i < n && (str_eq(w[i], L"out") || str_eq(w[i], L"the"))) i++;
+        if (i < n && (str_eq(w[i], L"page") || str_eq(w[i], L"pages"))) pg = i;
+    }
+    bool bare_pdf = false;   /* "<file> to pdf", "pdf to word <file>" */
+    int len;
+    if (!conv_v && !split_v && !merge_v && !ren_v && !move_v && !copy_v && !del_v && pg < 0) {
+        if (n >= 3 && (words_at(w, n, 0, L"pdf to", &len) || words_at(w, n, 0, L"pdf into", &len) ||
+                       words_at(w, n, 0, L"word to", &len) || words_at(w, n, 0, L"docx to", &len) ||
+                       words_at(w, n, 0, L"doc to", &len))) bare_pdf = true;
+        else {
+            for (int i = n - 1; i >= 1; i--)
+                if (in_list(w[i], (WList){ L"to", L"into", NULL })) {
+                    int used;
+                    if (target_at(w, n, i + 1, &used) == DOC_TO_PDF && i + 1 + used == n) bare_pdf = true;
+                    break;
+                }
+        }
+        if (!bare_pdf) return 0;
+    }
+    /* cheap exclusions: these verbs start other commands too */
+    if (conv_v || in_list(v0, EXTRACT_V)) {
+        bool any = pg >= 0;
+        for (int i = 1; i < n && !any; i++) { int used; any = target_at(w, n, i, &used) != DOC_NONE && i > 1; }
+        if (!any && !str_eq(v0, L"convert") && !copy_v) return 0;
+    }
+    if (str_eq(v0, L"cut") || str_eq(v0, L"break") || str_eq(v0, L"separate") || str_eq(v0, L"divide")) {
+        bool page = false;
+        for (int i = 1; i < n; i++) if (str_eq(w[i], L"page") || str_eq(w[i], L"pages")) page = true;
+        if (!page) return 0;
+    }
+
+    if (!take_modifiers(w, &n, p, r)) return 2;
+
+    /* ---- extract */
+    if (pg >= 0) {
+        int a = 0, b = 0, i = pg + 1, u;
+        if (i < n && wcschr(w[i], L'-')) {               /* "2-4" */
+            wchar_t *dash = wcschr(w[i], L'-');
+            a = _wtoi(w[i]); b = _wtoi(dash + 1);
+            i++;
+        } else if ((u = page_num(w, n, i, &a))) {
+            i += u;
+            if (i < n && in_list(w[i], (WList){ L"to", L"through", L"thru", L"till", L"until", L"and", L"-", NULL }) &&
+                (u = page_num(w, n, i + 1, &b))) i += 1 + u;
+            else b = a;
+        }
+        if (a < 1 || b < a) {
+            reply(r, L"Which pages? Say for example: extract pages 2 to 5 from notes.");
+            record(L"SAY");
+            r->listen_again = true;
+            return 2;
+        }
+        if (i < n && in_list(w[i], (WList){ L"from", L"of", L"in", L"out", NULL })) i++;
+        if (i < n && str_eq(w[i], L"of")) i++;
+        join_words(w, i, n, q, 256);
+        p->op = DOC_EXTRACT; p->a = a; p->b = b;
+        add_file(p, q);
+        return 1;
+    }
+
+    /* ---- split */
+    if (split_v) {
+        int at = -1, N = 0, u = 0, adj = 0;
+        for (int i = 1; i < n && at < 0; i++)
+            if ((str_eq(w[i], L"page") || str_eq(w[i], L"pages")) && (u = page_num(w, n, i + 1, &N))) at = i;
+        if (at < 0)   /* "split notes at 5" */
+            for (int i = 1; i + 1 < n && at < 0; i++)
+                if (in_list(w[i], (WList){ L"at", L"after", L"until", L"till", NULL }) && (u = page_num(w, n, i + 1, &N))) at = i + 1;
+        if (at < 0 || N < 1) {
+            reply(r, L"After which page should I split it? Say for example: split notes at page 5.");
+            record(L"SAY");
+            r->listen_again = true;
+            return 2;
+        }
+        int k = at;   /* walk back over "at", "after", "up to", "until" ... and "into two parts" */
+        while (k > 1 && in_list(w[k - 1], (WList){ L"at", L"after", L"up", L"to", L"until", L"till", L"from",
+                                                   L"on", L"by", L"before", L"with", L"the", L"upto", NULL })) {
+            if (str_eq(w[k - 1], L"from") || str_eq(w[k - 1], L"before")) adj = -1;
+            k--;
+        }
+        if (k > 2 && in_list(w[k - 1], (WList){ L"parts", L"part", L"halves", L"pieces", L"pdfs", L"files", NULL })) k--;
+        if (k > 2 && in_list(w[k - 1], (WList){ L"two", L"2", L"half", L"halves", NULL }) &&
+            in_list(w[k - 2], (WList){ L"into", L"in", NULL })) k -= 2;
+        join_words(w, 1, k, q, 256);
+        p->op = DOC_SPLIT;
+        p->a = N + adj;
+        if (p->a < 1) p->a = 1;
+        add_file(p, q);
+        return 1;
+    }
+
+    /* ---- merge */
+    if (merge_v) {
+        while (n > 1 && in_list(w[n - 1], (WList){ L"together", L"one", L"pdf", L"file", L"single", L"a", L"into", NULL })) n--;
+        p->op = DOC_MERGE;
+        int st = 1;
+        for (int i = 1; i <= n; i++)
+            if (i == n || in_list(w[i], (WList){ L"and", L"with", L"plus", L"&", NULL })) {
+                join_words(w, st, i, q, 256);
+                if (q[0]) add_file(p, q);
+                st = i + 1;
+            }
+        if (p->nfile == 0) add_file(p, L"these");
+        return 1;
+    }
+
+    /* ---- delete */
+    if (del_v) {
+        while (n > 1 && in_list(w[n - 1], (WList){ L"permanently", L"forever", NULL })) n--;
+        int cut;
+        for (int i = 1; i < n; i++)
+            if ((words_at(w, n, i, L"to the recycle bin", &cut) || words_at(w, n, i, L"to recycle bin", &cut) ||
+                 words_at(w, n, i, L"to the trash", &cut) || words_at(w, n, i, L"to trash", &cut) ||
+                 words_at(w, n, i, L"to the bin", &cut)) && i + cut == n) { n = i; break; }
+        join_words(w, 1, n, q, 256);
+        p->op = DOC_DELETE;
+        add_file(p, q);
+        return 1;
+    }
+
+    /* ---- rename / move / copy */
+    if (ren_v || move_v || copy_v) {
+        int at = -1;
+        for (int i = n - 2; i >= 1 && at < 0; i--)
+            if (in_list(w[i], ren_v ? (WList){ L"to", L"as", L"into", NULL } : (WList){ L"to", L"into", L"in", L"onto", L"inside", NULL }))
+                at = i;
+        wchar_t dest[256] = L"";
+        if (at >= 0) { join_words(w, at + 1, n, dest, 256); n = at; }
+        join_words(w, 1, n, q, 256);
+        add_file(p, q);
+        if (ren_v) {
+            p->op = DOC_RENAME;
+            if (dest[0]) clean_name(dest, p->name, 160);
+            if (!p->name[0]) { reply(r, L"What should I call it? Say for example: rename it to final report."); record(L"SAY"); r->listen_again = true; return 2; }
+            return 1;
+        }
+        p->op = move_v ? DOC_MOVE : DOC_COPY;
+        if (dest[0]) {
+            wchar_t d2[256];
+            strip_articles(dest, d2, 256);
+            if (move_v && in_list(d2, (WList){ L"trash", L"recycle bin", L"bin", L"the recycle bin", NULL })) { p->op = DOC_DELETE; return 1; }
+            if (!resolve_folder(dest, p->folder)) {
+                wchar_t d[128];
+                str_copy(d, 128, dest);
+                reply(r, L"I couldn't find a folder called %ls.", d);
+                record(L"SAY");
+                return 2;
+            }
+        }
+        if (!p->folder[0]) { reply(r, L"Where to? Say for example: move it to downloads."); record(L"SAY"); r->listen_again = true; return 2; }
+        return 1;
+    }
+
+    /* ---- convert */
+    {
+        int st = 1, end = n, tail = n;
+        DocOp op = DOC_NONE;
+        if (bare_pdf && !in_list(v0, CONVERT_V)) {
+            if (words_at(w, n, 0, L"pdf to", &len) || words_at(w, n, 0, L"pdf into", &len)) {
+                int used;
+                if ((op = target_at(w, n, 2, &used)) == DOC_TO_DOCX) st = 2 + used;
+                else return 0;
+            } else if (words_at(w, n, 0, L"word to", &len) || words_at(w, n, 0, L"docx to", &len) || words_at(w, n, 0, L"doc to", &len)) {
+                int used;
+                if ((op = target_at(w, n, 2, &used)) == DOC_TO_PDF) st = 2 + used;
+                else return 0;
+            } else st = 0;
+        }
+        if (op == DOC_NONE) {
+            for (int i = n - 1; i >= st + 1; i--) {
+                int used;
+                bool prep = in_list(w[i], (WList){ L"to", L"into", L"as", NULL });
+                DocOp t = prep ? target_at(w, n, i + 1, &used) : DOC_NONE;
+                if (!t && str_eq(v0, L"make") && (str_eq(w[i], L"a") || str_eq(w[i], L"an"))) { t = target_at(w, n, i, &used); prep = false; }
+                if (t) { op = t; end = i; tail = i + (prep ? 1 : 0) + used; break; }
+            }
+            if (op == DOC_NONE && !str_eq(v0, L"convert")) return 0;
+            /* "to pdf as final report", "to word named x" */
+            if (tail < n) {
+                int k = tail;
+                while (k < n && in_list(w[k], (WList){ L"and", L"as", L"named", L"called", L"with", L"name", L"it", NULL })) k++;
+                join_words(w, k, n, q, 256);
+                if (q[0] && !p->name[0]) clean_name(q, p->name, 160);
+            }
+        } else end = n;
+        join_words(w, st, end, q, 256);
+        p->op = op;
+        add_file(p, q);
+        return 1;
+    }
+}
+
+static const wchar_t *op_verb(DocOp op)
+{
+    switch (op) {
+    case DOC_TO_PDF: case DOC_TO_DOCX: case DOC_NONE: return L"convert";
+    case DOC_SPLIT: return L"split";
+    case DOC_EXTRACT: return L"take pages from";
+    case DOC_MERGE: return L"merge";
+    case DOC_PAGES: return L"count";
+    case DOC_RENAME: return L"rename";
+    case DOC_MOVE: return L"move";
+    case DOC_COPY: return L"copy";
+    case DOC_DELETE: return L"delete";
+    }
+    return L"use";
+}
+
+static void plan_run(Plan *p, CmdResult *r);
+
+/* Resolves file i of the plan; false when it replied (list / not found) */
+static bool plan_resolve(Plan *p, int i, CmdResult *r)
+{
+    ExtClass hint;
+    wchar_t refs[DOC_MAX_SRC][MAX_PATH];
+    if (is_ref(p->q[i], &hint)) {
+        int max = p->op == DOC_MERGE ? DOC_MAX_SRC - i : 1;
+        int n = resolve_ref(p->op, hint, refs, max);
+        if (!n) {
+            reply(r, s_nsel ? L"The selected file isn't something I can %ls. Which file?" : L"Which file?", op_verb(p->op));
+            record(L"SAY");
+            r->listen_again = true;
+            return false;
+        }
+        str_copy(p->path[i], MAX_PATH, refs[0]);
+        p->q[i][0] = 0;
+        /* "merge these": every selected PDF */
+        for (int k = 1; k < n && p->nfile < DOC_MAX_SRC; k++) {
+            str_copy(p->path[p->nfile], MAX_PATH, refs[k]);
+            p->q[p->nfile++][0] = 0;
+        }
+        return true;
+    }
+    wchar_t name[256];
+    strip_articles(p->q[i], name, 256);
+    if (wcschr(name, L'\\') && path_exists(name)) { str_copy(p->path[i], MAX_PATH, name); p->q[i][0] = 0; return true; }
+    if (!wait_index()) { reply(r, L"Still indexing your files, try again in a moment."); record(L"SAY"); return false; }
+    FileQ fq;
+    build_query(name, &fq, (p->op == DOC_RENAME || p->op == DOC_MOVE || p->op == DOC_COPY || p->op == DOC_DELETE) ? 0 : SF_FILES_ONLY);
+    if (!fq.ext) fq.ext = op_ext(p->op);
+    Hit all[MAX_HITS], hits[MAX_HITS];
+    int na = run_query(&fq, all, MAX_HITS), n = 0;
+    for (int k = 0; k < na; k++) if (op_accepts(p->op, all[k].path)) hits[n++] = all[k];
+    wchar_t d[128];
+    str_copy(d, 128, name);
+    if (n == 0) {
+        reply(r, na ? L"I found %ls, but it isn't something I can %ls." : L"I couldn't find %ls.", d, op_verb(p->op));
+        record(L"SAY");
+        r->listen_again = true;
+        return false;
+    }
+    bool confident = (fq.flags & SF_RECENT) || (hits[0].score >= 60 && (n == 1 || hits[0].score - hits[1].score >= 12));
+    if (confident) { str_copy(p->path[i], MAX_PATH, hits[0].path); p->q[i][0] = 0; return true; }
+    show_list(hits, n, PICK_OPEN, r);
+    s_plan = *p;
+    s_plan_wait = true;
+    if (n == 1) reply(r, L"Is it this one? Say one to %ls it.", op_verb(p->op));
+    else reply(r, L"Which %ls should I %ls? Say a number.", d, op_verb(p->op));
+    return false;
+}
+
+static void plan_continue(Plan *p, CmdResult *r)
+{
+    for (int i = 0; i < p->nfile; i++)
+        if (p->q[i][0] && !plan_resolve(p, i, r)) return;
+    plan_run(p, r);
+}
+
+/* all files known: work out the output names and run (or record) the task */
+static void plan_run(Plan *p, CmdResult *r)
+{
+    DocTask t;
+    memset(&t, 0, sizeof t);
+    t.op = p->op;
+    t.a = p->a; t.b = p->b;
+    t.nsrc = p->nfile;
+    for (int i = 0; i < p->nfile; i++) str_copy(t.src[i], MAX_PATH, p->path[i]);
+    const wchar_t *src = t.src[0];
+    if (t.op == DOC_NONE) t.op = ext_class_of(src) == EXT_PDF ? DOC_TO_DOCX : DOC_TO_PDF;
+    wchar_t n0[128], dir[MAX_PATH], base[MAX_PATH], ext[32], fname[MAX_PATH];
+    short_name(src, n0, 128);
+    path_parts(src, dir, base, ext);
+    const wchar_t *out_dir = p->folder[0] ? p->folder : dir;
+    const wchar_t *nmb = p->name[0] ? p->name : base;
+
+    if (t.op == DOC_TO_PDF && ext_class_of(src) == EXT_PDF) { reply(r, L"%ls is already a PDF.", n0); record(L"SAY"); return; }
+    if (t.op == DOC_MERGE && t.nsrc < 2) {
+        reply(r, L"I need at least two PDFs to merge. Say for example: merge notes and homework.");
+        record(L"SAY");
+        r->listen_again = true;
+        return;
+    }
+    if (t.op == DOC_DELETE || t.op == DOC_MOVE || t.op == DOC_RENAME) {
+        const wchar_t *why = docs_protected(src);
+        if (why) { reply(r, L"I won't %ls %ls, %ls.", op_verb(t.op), n0, why); record(L"SAY"); return; }
+    }
+
+    switch (t.op) {
+    case DOC_TO_PDF:  swprintf(fname, MAX_PATH, L"%ls.pdf", nmb);  join_path(t.dst[0], out_dir, fname); break;
+    case DOC_TO_DOCX: swprintf(fname, MAX_PATH, L"%ls.docx", nmb); join_path(t.dst[0], out_dir, fname); break;
+    case DOC_SPLIT:
+        swprintf(fname, MAX_PATH, L"%ls part 1.pdf", nmb); join_path(t.dst[0], out_dir, fname);
+        swprintf(fname, MAX_PATH, L"%ls part 2.pdf", nmb); join_path(t.dst[1], out_dir, fname);
+        break;
+    case DOC_EXTRACT:
+        if (p->name[0]) swprintf(fname, MAX_PATH, L"%ls.pdf", p->name);
+        else if (t.a == t.b) swprintf(fname, MAX_PATH, L"%ls page %d.pdf", base, t.a);
+        else swprintf(fname, MAX_PATH, L"%ls pages %d-%d.pdf", base, t.a, t.b);
+        join_path(t.dst[0], out_dir, fname);
+        break;
+    case DOC_MERGE:
+        if (p->name[0]) swprintf(fname, MAX_PATH, L"%ls.pdf", p->name);
+        else swprintf(fname, MAX_PATH, L"%ls merged.pdf", base);
+        join_path(t.dst[0], out_dir, fname);
+        break;
+    case DOC_RENAME: case DOC_MOVE: case DOC_COPY: {
+        const wchar_t *e = p->name[0] ? PathFindExtensionW(p->name) : L"";
+        bool has_ext = e[0] && (ext_class_of(p->name) != EXT_ANY || _wcsicmp(e, ext) == 0);
+        if (p->name[0]) swprintf(fname, MAX_PATH, L"%ls%ls", p->name, has_ext ? L"" : ext);
+        else str_copy(fname, MAX_PATH, path_name(src));
+        join_path(t.dst[0], out_dir, fname);
+        if (t.op != DOC_RENAME && path_is_dir(src) && is_parent_of_path(src, t.dst[0])) {
+            reply(r, L"I can't put a folder inside itself.");
+            record(L"SAY");
+            return;
+        }
+        break;
+    }
+    default: break;
+    }
+    for (int k = 0; k < 2; k++) if (t.dst[k][0]) { wchar_t u[MAX_PATH]; docs_unique(t.dst[k], u); str_copy(t.dst[k], MAX_PATH, u); }
+
+    /* the dry-run action line */
+    static const wchar_t *const FILEV[] = { [DOC_RENAME] = L"rename", [DOC_MOVE] = L"move", [DOC_COPY] = L"copy" };
+    switch (t.op) {
+    case DOC_TO_PDF:  record(L"DOC convert-pdf %ls -> %ls", src, t.dst[0]); break;
+    case DOC_TO_DOCX: record(L"DOC convert-docx %ls -> %ls", src, t.dst[0]); break;
+    case DOC_SPLIT:   record(L"DOC split %ls @%d -> %ls | %ls", src, t.a, t.dst[0], t.dst[1]); break;
+    case DOC_EXTRACT: record(L"DOC extract %ls %d-%d -> %ls", src, t.a, t.b, t.dst[0]); break;
+    case DOC_PAGES:   record(L"DOC pages %ls", src); break;
+    case DOC_MERGE: {
+        wchar_t list[ACT_CAP] = L"";
+        for (int i = 0; i < t.nsrc; i++) { if (i) str_cat(list, ACT_CAP, L" + "); str_cat(list, ACT_CAP, t.src[i]); }
+        record(L"DOC merge %ls -> %ls", list, t.dst[0]);
+        break;
+    }
+    case DOC_RENAME: case DOC_MOVE: case DOC_COPY:
+        record(L"FILE %ls %ls -> %ls", FILEV[t.op], src, t.dst[0]);
+        break;
+    case DOC_DELETE:
+        record(L"ASK delete %ls", src);
+        break;
+    default: break;
+    }
+    s_nrows = 0;
+
+    if (t.op == DOC_DELETE) {
+        str_copy(s_del, MAX_PATH, src);
+        s_del_wait = true;
+        reply(r, L"Move %ls to the Recycle Bin? Say yes or no.", n0);
+        r->listen_again = true;
+        return;
+    }
+    wchar_t o1[128];
+    short_name(t.dst[0], o1, 128);
+    if (t.op == DOC_RENAME || t.op == DOC_MOVE || t.op == DOC_COPY) {
+        if (s_dry) {
+            if (t.op == DOC_RENAME) reply(r, L"Renamed it to %ls.", o1);
+            else reply(r, L"%ls %ls.", t.op == DOC_MOVE ? L"Moved" : L"Copied", o1);
+            done(r);
+            return;
+        }
+        DocResult res;
+        docs_run(&t, &res);
+        str_copy(r->reply, 300, res.reply);
+        r->speak = true;
+        if (res.ok) { set_last(res.out[0]); done(r); }
+        return;
+    }
+    switch (t.op) {
+    case DOC_TO_PDF:  reply(r, L"Converting %ls to PDF\x2026", n0); break;
+    case DOC_TO_DOCX: reply(r, L"Converting %ls to Word\x2026", n0); break;
+    case DOC_SPLIT:   reply(r, L"Splitting %ls after page %d\x2026", n0, t.a); break;
+    case DOC_EXTRACT: reply(r, L"Taking pages %d to %d from %ls\x2026", t.a, t.b, n0); break;
+    case DOC_MERGE:   reply(r, L"Merging %d PDFs\x2026", t.nsrc); break;
+    case DOC_PAGES:   reply(r, L"Counting the pages of %ls\x2026", n0); break;
+    default: break;
+    }
+    if (s_dry) { done(r); return; }
+    if (docs_busy()) { reply(r, L"I'm still working on the last one, give me a moment."); record(L"SAY"); return; }
+    if (!docs_run_async(&t, s_notify)) { reply(r, L"I couldn't start that."); record(L"SAY"); return; }
+    r->close = false;          /* the result arrives later as WM_APP_TASK */
+    r->listen_again = false;
+}
+
+/* follow-up to "Move X to the Recycle Bin?" */
+static bool run_delete_answer(const wchar_t *s, CmdResult *r)
+{
+    static WList YES_W = { L"yes", L"yeah", L"yep", L"yup", L"sure", L"do it", L"confirm", L"yes delete it",
+        L"yes please", L"delete it", L"go ahead", L"ok", L"okay", L"yes do it", NULL };
+    static WList NO_W = { L"no", L"nope", L"don't", L"dont", L"cancel", L"stop", L"never mind", L"nevermind",
+        L"keep it", L"no thanks", L"don't delete it", L"dont delete it", NULL };
+    s_del_wait = false;
+    wchar_t n0[128];
+    short_name(s_del, n0, 128);
+    if (in_list(s, YES_W)) {
+        record(L"FILE delete %ls", s_del);
+        if (s_dry) { reply(r, L"Moved %ls to the Recycle Bin.", n0); done(r); return true; }
+        DocTask t;
+        memset(&t, 0, sizeof t);
+        t.op = DOC_DELETE; t.nsrc = 1;
+        str_copy(t.src[0], MAX_PATH, s_del);
+        DocResult res;
+        docs_run(&t, &res);
+        str_copy(r->reply, 300, res.reply);
+        r->speak = true;
+        if (res.ok && _wcsicmp(s_last, s_del) == 0) s_last[0] = 0;
+        for (int i = 0; i < s_nsel; i++) if (_wcsicmp(s_sel[i], s_del) == 0) s_nsel = 0;
+        done(r);
+        return true;
+    }
+    if (in_list(s, NO_W)) { record(L"SAY"); reply(r, L"Okay, I kept %ls.", n0); done(r); return true; }
+    return false;   /* something else: forget the question, run it as a new command */
+}
+
+/* "open this", "show it in folder": the Explorer selection or the last file */
+static bool open_ref(const wchar_t *phrase, bool reveal, CmdResult *r)
+{
+    ExtClass hint;
+    if (!is_ref(phrase, &hint)) return false;
+    wchar_t p[1][MAX_PATH];
+    if (!resolve_ref(DOC_RENAME, hint, p, 1)) {
+        reply(r, L"Which file?");
+        record(L"SAY");
+        r->listen_again = true;
+        return true;
+    }
+    if (reveal) {
+        wchar_t n0[128];
+        short_name(p[0], n0, 128);
+        if (hit_missing(p[0], n0, r)) return true;
+        act_reveal(p[0]);
+        reply(r, L"Here's %ls.", n0);
+        set_last(p[0]);
+        done(r);
+    } else deliver(p[0], r);
+    return true;
+}
+
+static bool try_docs(const wchar_t *s, CmdResult *r)
+{
+    Plan p;
+    int k = parse_docs(s, &p, r);
+    if (k == 0) return false;
+    if (k == 1) plan_continue(&p, r);
+    return true;
+}
+
+void cmd_set_notify(HWND hwnd) { s_notify = hwnd; }
+
+void cmd_set_selection(const wchar_t (*paths)[MAX_PATH], int n)
+{
+    s_nsel = 0;
+    for (int i = 0; i < n && s_nsel < DOC_MAX_SRC; i++) str_copy(s_sel[s_nsel++], MAX_PATH, paths[i]);
+}
+
+void cmd_task_done(const DocResult *d, CmdResult *r)
+{
+    memset(r, 0, sizeof *r);
+    if (!d) return;
+    str_copy(r->reply, 300, d->reply);
+    r->speak = true;
+    if (!d->ok || d->nout == 0) { record(L"SAY"); return; }
+    for (int i = 0; i < d->nout && i < MAX_HITS; i++) {
+        memset(&r->rows[i], 0, sizeof(Row));
+        r->rows[i].kind = ROW_HIT;
+        str_copy(r->rows[i].hit.path, MAX_PATH, d->out[i]);
+        r->rows[i].hit.score = 100;
+        s_rows[i] = r->rows[i];
+    }
+    r->nrows = d->nout;
+    s_nrows = d->nout;
+    s_mode = PICK_OPEN;
+    r->pick_mode = PICK_OPEN;
+    r->rows_replace = true;
+    r->listen_again = true;    /* "open it" / "one" */
+    set_last(d->out[0]);
+}
+
 /* ---------------------------------------------------------------- public */
 void cmd_init(HWND dialog)
 {
@@ -1006,6 +1820,17 @@ void cmd_pick(const Row *row, PickMode mode, CmdResult *r)
     wchar_t nm[128];
     short_name(rw.hit.path, nm, 128);
     if (hit_missing(rw.hit.path, nm, r)) return;
+    if (s_plan_wait && mode != PICK_REVEAL) {   /* "convert resume to pdf" ... "two" */
+        s_plan_wait = false;
+        Plan p = s_plan;
+        for (int i = 0; i < p.nfile; i++)
+            if (p.q[i][0]) { str_copy(p.path[i], MAX_PATH, rw.hit.path); p.q[i][0] = 0; break; }
+        s_nrows = 0;
+        plan_continue(&p, r);
+        return;
+    }
+    s_plan_wait = false;
+    set_last(rw.hit.path);
     if (mode == PICK_REVEAL) {
         act_reveal(rw.hit.path);
         reply(r, L"Here's %ls.", nm);
@@ -1091,6 +1916,11 @@ void cmd_run(const wchar_t *text, CmdResult *r)
         return;
     }
     log_line(L"cmd: %ls", s);
+    str_copy(s_orig, S_CAP, text);
+
+    /* answer to "Move X to the Recycle Bin? Say yes or no." */
+    if (s_del_wait && run_delete_answer(s, r)) return;
+    s_del_wait = false;
 
     /* follow-up to a list: "two", "the second one", "open folder" */
     if (s_nrows > 0 && s_rows[0].kind == ROW_HIT) {
@@ -1098,6 +1928,7 @@ void cmd_run(const wchar_t *text, CmdResult *r)
         int n = parse_pick(s, &reveal);
         if (n) { cmd_pick(&s_rows[n - 1], reveal ? PICK_REVEAL : s_mode, r); return; }
     }
+    s_plan_wait = false;    /* anything else: forget a pending "which file?" */
     /* a bare "two" / "number 3" with no list up: don't search files named "2" */
     {
         wchar_t t[S_CAP];
@@ -1119,6 +1950,7 @@ void cmd_run(const wchar_t *text, CmdResult *r)
         strip_articles(s, name, 256);
         if (name[0] && try_config(name, r)) return;
     }
+    if (try_docs(s, r)) return;
     if (try_browser(s, r)) return;
 
     wchar_t q[S_CAP];
@@ -1128,6 +1960,7 @@ void cmd_run(const wchar_t *text, CmdResult *r)
     FileQ fq;
     if (match_reveal(s, q, S_CAP)) {
         wchar_t name[256];
+        if (open_ref(q, true, r)) return;
         strip_articles(q, name, 256);
         build_query(name, &fq, 0);
         do_files(name, &fq, FM_REVEAL, false, r);
@@ -1157,6 +1990,12 @@ int cmd_preview(const wchar_t *text, Row *rows, int max)
     int engine;
     normalize(text ? text : L"", s, S_CAP);
     if (!s[0] || is_fixed(s) || match_web(s, &engine, q, S_CAP)) return 0;
+    {   /* document commands: no live file list (a click would run "open") */
+        wchar_t w1[1][64];
+        static WList DOCV = { L"convert", L"split", L"merge", L"combine", L"extract", L"rename", L"move",
+                              L"copy", L"delete", L"remove", L"trash", L"erase", NULL };
+        if (split_words(s, w1, 1) && in_list(w1[0], DOCV)) return 0;
+    }
     if (match_reveal(s, q, S_CAP)) str_copy(s, S_CAP, q);
     else {
         const wchar_t *const *lists[] = { FIND_V, GOTO_V, UPLOAD_V, OPEN_V };
@@ -1188,12 +2027,14 @@ static bool speakable(const wchar_t *s)
 
 void cmd_grammar(PhraseFn fn, void *ctx)
 {
-    static WList VERBS = { L"open", L"go to", L"launch", L"start", L"show", L"upload", L"find", NULL };
+    static WList VERBS = { L"open", L"go to", L"launch", L"start", L"show", L"upload", L"find", L"convert",
+        L"split", L"merge", L"extract", L"rename", L"move", L"copy", L"delete", NULL };
     static WList PHRASES = { L"cancel", L"never mind", L"close", L"help", L"what time is it", L"what's the date",
         L"battery", L"lock", L"screenshot", L"volume up", L"volume down", L"mute", L"number one", L"number two",
         L"number three", L"number four", L"number five", L"number six", L"number seven", L"number eight",
         L"first", L"second", L"third", L"fourth", L"fifth", L"sixth", L"seventh", L"eighth",
-        L"show in folder", L"what can you do", L"what day is it", NULL };
+        L"show in folder", L"what can you do", L"what day is it", L"yes", L"no",
+        L"convert this to pdf", L"convert this to word", L"merge these", L"delete this", NULL };
     for (const wchar_t *const *v = VERBS; *v; v++) fn(*v, NULL, ctx);
     const KVList *lists[] = { &g_cfg.sites, &g_cfg.apps, &g_cfg.folders };
     for (int l = 0; l < 3; l++)

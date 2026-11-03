@@ -114,12 +114,25 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
         wchar_t text[1024];
         join_args(argc, argv, 2, text, 1024);
         cmd_init(NULL);
+        /* testing "this"/"these": JARVIS_SELECTION=path1|path2 stands in for Explorer */
+        static wchar_t sel[DOC_MAX_SRC][MAX_PATH], env[DOC_MAX_SRC * MAX_PATH];
+        int nsel = 0;
+        if (GetEnvironmentVariableW(L"JARVIS_SELECTION", env, DOC_MAX_SRC * MAX_PATH))
+            for (wchar_t *ctx = NULL, *t = wcstok(env, L"|", &ctx); t && nsel < DOC_MAX_SRC; t = wcstok(NULL, L"|", &ctx))
+                str_copy(sel[nsel++], MAX_PATH, t);
+        cmd_set_selection((const wchar_t (*)[MAX_PATH])sel, nsel);
         int rc = run_console(mode, text);
         LocalFree(argv);
         return rc;
     }
 
     HWND dlg = dialog_detect(fg);
+    {   /* files selected in Explorer / on the Desktop = "this" / "these" */
+        static wchar_t sel[DOC_MAX_SRC][MAX_PATH];
+        int nsel = dlg ? 0 : shell_selection(fg, sel, DOC_MAX_SRC);
+        cmd_set_selection((const wchar_t (*)[MAX_PATH])sel, nsel);
+        if (nsel) log_line(L"explorer selection: %d item(s)", nsel);
+    }
     /* leading --flags, then an optional command */
     bool type_only = false, background = g_cfg.background;
     int first = 1;
@@ -141,6 +154,7 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
 
     if (!ui_create(inst, dlg, listen, initial[0] ? initial : NULL, background)) return 1;
     int rc = ui_loop();
+    docs_wait(300000);   /* window closed mid-conversion: let Office finish and quit */
     LocalFree(argv);
     return rc;
 }
