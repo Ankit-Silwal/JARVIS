@@ -212,8 +212,14 @@ typedef struct {
 } CmdResult;
 
 void cmd_init(HWND dialog);
-/* window that receives WM_APP_TASK when a background document task ends */
+/* window that receives WM_APP_TASK when a background document task ends,
+ * and WM_TIMER with ids TIMER_ID_BASE.. when a timer / reminder goes off */
 void cmd_set_notify(HWND hwnd);
+#define TIMER_ID_BASE 100
+#define MAX_TIMERS    8
+/* WM_TIMER with id >= TIMER_ID_BASE arrived: the reply + a row for it (empty if stale) */
+void cmd_timer_fired(int id, CmdResult *r);
+int  cmd_timers_active(void);
 /* files selected in Explorer / on the Desktop when JARVIS started ("this", "these") */
 void cmd_set_selection(const wchar_t (*paths)[MAX_PATH], int n);
 HWND cmd_dialog(void);
@@ -232,6 +238,12 @@ HWND cmd_dialog(void);
  *   "SET speak=0|1"      JARVIS's voice muted / unmuted ("mute jarvis", "stop talking",
  *                        "be quiet" / "unmute jarvis", "voice on")
  *   "SET speak_confirm=0|1"  "talk less" / "talk more" (confirmations shown, not spoken)
+ *   "TIMER <secs> <label|->" timer / reminder set; "TIMER cancel"
+ *   "SYS media_play_pause|media_next|media_previous|media_stop"
+ *   "SYS volume=<0-100>"  volume level
+ *   "ASK shutdown|restart|sleep|hibernate|signout|empty_recycle_bin"  asked yes/no
+ *   "SYS shutdown|..."    done after the user said yes; "SYS abort" cancels a shutdown
+ *   "NOTE <text>"         appended to Documents\JARVIS notes.txt
  *   "CLEAR"              cleared the box ("clear", "clear screen")
  *   "CLOSE"              closed without doing anything
  *   "DOC convert-pdf <src> -> <dst>"           Word/PowerPoint/Excel/image to PDF
@@ -299,6 +311,14 @@ void docs_wait(DWORD ms);
 const wchar_t *docs_protected(const wchar_t *path);
 /* files selected in the Explorer window / Desktop fg; returns the count */
 int  shell_selection(HWND fg, wchar_t (*out)[MAX_PATH], int max);
+
+/* ------------------------------------------------------------------- sys.c */
+/* OS actions for the extra commands (never called in dry-run) */
+bool sys_volume_get(int *pct, bool *muted);
+bool sys_volume_set(int pct);
+void sys_media(const wchar_t *what);     /* play_pause, next, previous, stop */
+bool sys_power(const wchar_t *what);     /* shutdown, restart, signout, sleep, hibernate, abort */
+bool sys_empty_recycle_bin(void);
 
 /* --------------------------------------------------------------------- ui.c */
 /* initial_cmd: optional command to run right away (from the command line).

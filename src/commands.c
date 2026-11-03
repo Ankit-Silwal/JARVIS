@@ -13,6 +13,7 @@
 
 #define S_CAP   512
 #define ACT_CAP 2400
+#include <math.h>
 
 /* ------------------------------------------------------------ module state */
 static HWND     s_dialog;               /* Upload/Open dialog we were started over */
@@ -24,7 +25,11 @@ static PickMode s_mode;
 static wchar_t  s_last[MAX_PATH];       /* last file opened / listed / produced ("it") */
 static wchar_t  s_sel[DOC_MAX_SRC][MAX_PATH];   /* Explorer selection at start ("this") */
 static int      s_nsel;
+static HWND     s_notify;               /* window that gets WM_APP_TASK and timer ticks */
+static wchar_t  s_last_reply[300];      /* for "repeat that" */
+static wchar_t  s_orig[S_CAP];          /* the command as typed (for name casing, notes) */
 static void set_last(const wchar_t *p);
+static void orig_case(wchar_t *s);
 
 typedef const wchar_t *const WList[];   /* NULL-terminated word/phrase list */
 
@@ -977,6 +982,8 @@ static void show_help(CmdResult *r)
         {L"convert resume to pdf", L"PDF \x2194 Word, slides, sheets, images"},
         {L"split physics notes at page 5 and save it in downloads", L"Split, extract pages, merge PDFs"},
         {L"rename this to final report", L"Rename, move, copy, delete selected files"},
+        {L"timer 5 minutes, remind me in an hour to...", L"Timers and reminders; 'timers', 'cancel the timer'"},
+        {L"what's 12 times 8, note buy milk, pause", L"Calculator, notes, music, volume 50, sleep, shut down"},
         {L"what time is it, volume up, mute jarvis", L"Time, battery, your PC, JARVIS's voice"},
     };
     int n = (int)(sizeof H / sizeof H[0]);
@@ -1076,6 +1083,757 @@ static bool run_fixed(const wchar_t *s, CmdResult *r)
     return false;
 }
 
+/* ------------------------------------------------------------------ extras
+ * Timers and reminders, a calculator, media keys, the volume level, sleep /
+ * shut down / restart (after a yes), notes, "repeat that". */
+
+static WList ASK_YES = { L"yes", L"yeah", L"yep", L"yup", L"sure", L"do it", L"confirm", L"yes please",
+    L"go ahead", L"ok", L"okay", L"yes do it", L"affirmative", L"correct", L"yes do that", NULL };
+static WList ASK_NO = { L"no", L"nope", L"don't", L"dont", L"cancel", L"stop", L"never mind", L"nevermind",
+    L"no thanks", L"negative", L"abort", L"don't do it", L"dont do it", NULL };
+
+/* ---- numbers: "45", "2.5", "twenty five", "a hundred and five", "two and a half" */
+static const struct { const wchar_t *w; int n; } NUMW[] = {
+    {L"zero",0},{L"one",1},{L"two",2},{L"three",3},{L"four",4},{L"five",5},{L"six",6},{L"seven",7},
+    {L"eight",8},{L"nine",9},{L"ten",10},{L"eleven",11},{L"twelve",12},{L"thirteen",13},{L"fourteen",14},
+    {L"fifteen",15},{L"sixteen",16},{L"seventeen",17},{L"eighteen",18},{L"nineteen",19},{L"twenty",20},
+    {L"thirty",30},{L"forty",40},{L"fifty",50},{L"sixty",60},{L"seventy",70},{L"eighty",80},{L"ninety",90},
+};
+
+static int numw(const wchar_t *w)
+{
+    for (size_t i = 0; i < sizeof NUMW / sizeof NUMW[0]; i++) if (str_eq(w, NUMW[i].w)) return NUMW[i].n;
+    return -1;
+}
+
+static bool all_digits(const wchar_t *w)
+{
+    if (!w[0]) return false;
+    for (; *w; w++) if (!iswdigit(*w)) return false;
+    return true;
+}
+
+/* Reads a number starting at w[i]; returns the words used (0 = no number there). */
+static int read_number(wchar_t w[][64], int n, int i, double *out)
+{
+    int k = i;
+    if (k < n && (iswdigit(w[k][0]) || (w[k][0] == L'.' && iswdigit(w[k][1])))) {
+        wchar_t *end;
+        double v = wcstod(w[k], &end);
+        if (*end) return 0;
+        k++;
+        /* "1,000" came through as "1 000" */
+        while (k < n && wcslen(w[k]) == 3 && all_digits(w[k]) && !wcschr(w[k - 1], L'.')) { v = v * 1000 + _wtoi(w[k]); k++; }
+        if (k + 1 < n && str_eq(w[k], L"point") && all_digits(w[k + 1])) {   /* "2 point 5" */
+            double f = _wtoi(w[k + 1]);
+            for (size_t d = 0; d < wcslen(w[k + 1]); d++) f /= 10;
+            v += f;
+            k += 2;
+        }
+        *out = v;
+        return k - i;
+    }
+    double total = 0, cur = 0;
+    bool any = false;
+    for (; k < n; k++) {
+        const wchar_t *t = w[k];
+        int v = numw(t);
+        if ((str_eq(t, L"a") || str_eq(t, L"an")) && k + 1 < n && (str_eq(w[k + 1], L"hundred") || str_eq(w[k + 1], L"thousand"))) {
+            cur = 1; any = true; continue;
+        }
+        if (v >= 0) { cur += v; any = true; continue; }
+        if (str_eq(t, L"hundred")) { cur = (cur ? cur : 1) * 100; any = true; continue; }
+        if (str_eq(t, L"thousand")) { total += (cur ? cur : 1) * 1000; cur = 0; any = true; continue; }
+        if (str_eq(t, L"and") && any && k + 1 < n && (numw(w[k + 1]) >= 0 || str_eq(w[k + 1], L"a") || str_eq(w[k + 1], L"half")))
+            continue;
+        if (str_eq(t, L"half") && any) { cur += 0.5; continue; }
+        if (str_eq(t, L"a") && any && k + 1 < n && str_eq(w[k + 1], L"half")) continue;
+        if (str_eq(t, L"point") && any && k + 1 < n) {   /* "two point five" */
+            int d = numw(w[k + 1]);
+            if (d >= 0 && d < 10) { cur += d / 10.0; k++; continue; }
+        }
+        break;
+    }
+    if (!any) return 0;
+    *out = total + cur;
+    return k - i;
+}
+
+static int unit_secs(const wchar_t *u)
+{
+    static WList SEC = { L"second", L"seconds", L"sec", L"secs", NULL };
+    static WList MIN = { L"minute", L"minutes", L"min", L"mins", NULL };
+    static WList HR  = { L"hour", L"hours", L"hr", L"hrs", NULL };
+    if (in_list(u, SEC)) return 1;
+    if (in_list(u, MIN)) return 60;
+    if (in_list(u, HR)) return 3600;
+    return 0;
+}
+
+/* "5 minutes", "an hour and a half", "half an hour", "1 hour 30 minutes", "ninety seconds" */
+static int parse_duration(wchar_t w[][64], int n, int i, int *secs)
+{
+    int k = i, total = 0;
+    bool any = false;
+    for (;;) {
+        double v = 0;
+        int used = 0;
+        if (k + 1 < n && str_eq(w[k], L"half") && (str_eq(w[k + 1], L"a") || str_eq(w[k + 1], L"an"))) { v = 0.5; used = 2; }
+        else if (k + 1 < n && str_eq(w[k], L"half") && unit_secs(w[k + 1])) { v = 0.5; used = 1; }
+        else if (k < n && (str_eq(w[k], L"a") || str_eq(w[k], L"an") || str_eq(w[k], L"one"))) { v = 1; used = 1; }
+        if (!used) used = read_number(w, n, k, &v);
+        if (!used) break;
+        int u = k + used < n ? unit_secs(w[k + used]) : 0;
+        if (!u) break;
+        k += used + 1;
+        if (k + 2 < n && str_eq(w[k], L"and") && str_eq(w[k + 1], L"a") && str_eq(w[k + 2], L"half")) { v += 0.5; k += 3; }
+        else if (k + 1 < n && str_eq(w[k], L"and") && str_eq(w[k + 1], L"half")) { v += 0.5; k += 2; }
+        total += (int)(v * u + 0.5);
+        any = true;
+        /* "1 hour and 30 minutes", "1 hour 30 minutes" */
+        int j = k + (k < n && str_eq(w[k], L"and") ? 1 : 0);
+        double v2;
+        int u2 = read_number(w, n, j, &v2);
+        if (u2 && j + u2 < n && unit_secs(w[j + u2])) { k = j; continue; }
+        break;
+    }
+    if (!any) return 0;
+    *secs = total;
+    return k - i;
+}
+
+static void dur_text(int secs, wchar_t *out, size_t cap)
+{
+    int h = secs / 3600, m = (secs % 3600) / 60, s = secs % 60;
+    out[0] = 0;
+    wchar_t part[48];
+    if (h) { swprintf(part, 48, L"%d hour%ls", h, h == 1 ? L"" : L"s"); str_cat(out, cap, part); }
+    if (m) { swprintf(part, 48, L"%ls%d minute%ls", out[0] ? L" " : L"", m, m == 1 ? L"" : L"s"); str_cat(out, cap, part); }
+    if (s || !out[0]) { swprintf(part, 48, L"%ls%d second%ls", out[0] ? L" " : L"", s, s == 1 ? L"" : L"s"); str_cat(out, cap, part); }
+}
+
+/* ---- timers */
+typedef struct { bool used; DWORD due; int secs; bool reminder; wchar_t label[120]; } Timer;
+static Timer s_timers[MAX_TIMERS];
+
+static bool timer_set(int secs, bool reminder, const wchar_t *label, CmdResult *r)
+{
+    int i = 0;
+    while (i < MAX_TIMERS && s_timers[i].used) i++;
+    if (i == MAX_TIMERS) { reply(r, L"I already have %d timers running.", MAX_TIMERS); record(L"SAY"); return true; }
+    if (!s_dry && !s_notify) { reply(r, L"Timers only work while the JARVIS window is open."); record(L"SAY"); return true; }
+    if (!g_cfg.stay_open) {
+        reply(r, L"Timers need JARVIS to stay open. Set stay_open=1 in jarvis.ini.");
+        record(L"SAY");
+        return true;
+    }
+    Timer *t = &s_timers[i];
+    t->used = true; t->secs = secs; t->reminder = reminder;
+    t->due = GetTickCount() + (DWORD)secs * 1000;
+    str_copy(t->label, 120, label);
+    if (!s_dry) SetTimer(s_notify, TIMER_ID_BASE + i, (UINT)secs * 1000, NULL);
+    wchar_t d[96];
+    dur_text(secs, d, 96);
+    record(L"TIMER %d %ls", secs, label[0] ? label : L"-");
+    if (reminder) reply(r, L"I'll remind you%ls%ls in %ls.", label[0] ? L" to " : L"", label, d);
+    else if (label[0]) reply(r, L"%ls timer set for %ls.", label, d);
+    else reply(r, L"Timer set for %ls.", d);
+    if (reminder || label[0]) orig_case(r->reply);
+    r->ack = true;
+    return true;
+}
+
+static int timers_active(void)
+{
+    int n = 0;
+    for (int i = 0; i < MAX_TIMERS; i++) if (s_timers[i].used) n++;
+    return n;
+}
+
+static void timer_rows(CmdResult *r)
+{
+    DWORD now = GetTickCount();
+    int n = 0, min_left = 0, soonest = 0;
+    for (int i = 0; i < MAX_TIMERS && n < MAX_HITS; i++) {
+        Timer *t = &s_timers[i];
+        if (!t->used) continue;
+        int left = (int)(t->due - now) / 1000;
+        if (left < 0) left = 0;
+        wchar_t d[96];
+        dur_text(left, d, 96);
+        memset(&r->rows[n], 0, sizeof(Row));
+        r->rows[n].kind = ROW_INFO;
+        if (t->reminder) swprintf(r->rows[n].title, MAX_PATH, L"Reminder: %ls", t->label);
+        else if (t->label[0]) swprintf(r->rows[n].title, MAX_PATH, L"Timer: %ls", t->label);
+        else { dur_text(t->secs, d, 96); swprintf(r->rows[n].title, MAX_PATH, L"Timer (%ls)", d); dur_text(left, d, 96); }
+        swprintf(r->rows[n].sub, MAX_PATH, L"%ls left", d);
+        if (n == 0 || left < min_left) { min_left = left; soonest = n; }
+        n++;
+    }
+    r->nrows = n;
+    r->rows_replace = true;
+    s_nrows = 0;
+    if (!n) return;
+    wchar_t d[96];
+    dur_text(min_left, d, 96);
+    const Row *s0 = &r->rows[soonest];
+    if (n == 1) {
+        if (s0->title[0] == L'R') reply(r, L"%ls, in %ls.", s0->title, d);
+        else reply(r, L"%ls has %ls left.", s0->title, d);
+    } else {
+        reply(r, L"%d timers. The next one, %ls, in %ls.", n, s0->title, d);
+    }
+}
+
+static bool try_timer(const wchar_t *s, CmdResult *r)
+{
+    static WList TCANCEL = { L"cancel the timer", L"cancel timer", L"stop the timer", L"stop timer", L"cancel the timers",
+        L"cancel all timers", L"cancel timers", L"cancel the reminder", L"cancel reminder", L"cancel reminders",
+        L"cancel all reminders", L"clear timers", L"stop the reminder", L"remove the timer", L"delete the timer",
+        L"cancel my timer", L"cancel my reminder", L"stop the alarm", L"cancel the alarm", L"cancel alarm", NULL };
+    static WList TSTATUS = { L"timer", L"timers", L"my timers", L"timer status", L"how much time is left",
+        L"how much time left", L"how long is left", L"how long left", L"time left", L"check the timer",
+        L"check timer", L"reminders", L"my reminders", L"what timers are set", L"how much longer",
+        L"how much time is left on the timer", L"how long is left on the timer", L"show timers", L"list timers",
+        L"what reminders do i have", L"any reminders", L"any timers", NULL };
+    if (in_list(s, TCANCEL)) {
+        int n = timers_active();
+        for (int i = 0; i < MAX_TIMERS; i++)
+            if (s_timers[i].used) { s_timers[i].used = false; if (!s_dry && s_notify) KillTimer(s_notify, TIMER_ID_BASE + i); }
+        record(n ? L"TIMER cancel" : L"SAY");
+        if (!n) reply(r, L"There's no timer running.");
+        else reply(r, n == 1 ? L"Timer cancelled." : L"Cancelled %d timers.", n);
+        r->ack = n > 0;
+        r->rows_replace = true;   /* nrows 0: a timer list goes away */
+        s_nrows = 0;
+        return true;
+    }
+    if (in_list(s, TSTATUS)) {
+        timer_rows(r);
+        record(L"SAY");
+        if (!r->nrows) reply(r, L"No timers running.");
+        return true;
+    }
+
+    wchar_t w[48][64];
+    int n = split_words(s, w, 48);
+    int secs = 0, at = -1, used = 0;
+    for (int i = 0; i < n && at < 0; i++) {
+        int u = parse_duration(w, n, i, &secs);
+        if (u) { at = i; used = u; }
+    }
+    if (at < 0 || secs <= 0) return false;
+    bool reminder = contains_word(s, L"remind") || contains_word(s, L"reminder") || contains_word(s, L"reminders") ||
+                    str_starts(s, L"in ");
+    bool timer = contains_word(s, L"timer") || contains_word(s, L"alarm") || contains_word(s, L"countdown") ||
+                 contains_word(s, L"count down");
+    if (!reminder && !timer) return false;
+    if (secs > 24 * 3600) { reply(r, L"That's longer than a day, I can't keep a timer that long."); record(L"SAY"); return true; }
+
+    /* the label is what's left after the duration and the verb phrase */
+    wchar_t label[S_CAP] = L"", rest[S_CAP];
+    join_words(w, 0, at, label, S_CAP);
+    join_words(w, at + used, n, rest, S_CAP);
+    if (label[0] && rest[0]) str_cat(label, S_CAP, L" ");
+    str_cat(label, S_CAP, rest);
+    static WList STRIP = { L"set", L"start", L"put", L"create", L"make", L"add", L"give me", L"a", L"an", L"the",
+        L"new", L"timer", L"alarm", L"countdown", L"reminder", L"remind", L"me", L"for", L"of", L"to", L"that",
+        L"about", L"called", L"named", L"in", L"after", L"and", L"from now", L"on", L"with", NULL };
+    while (cut_prefixes(label, STRIP)) {}
+    for (bool again = true; again;) {
+        again = false;
+        static WList TAIL = { L"timer", L"reminder", L"alarm", L"from now", L"please", L"in", L"for", L"at",
+                              L"to", L"after", L"and", L"of", L"about", NULL };
+        for (const wchar_t *const *p = TAIL; *p; p++) if (cut_suffix(label, *p)) again = true;
+        if (cut_suffix(label, L"the")) again = true;
+    }
+    str_trim(label);
+    if (wcslen(label) > 100) label[100] = 0;
+    return timer_set(secs, reminder, label, r);
+}
+
+void cmd_timer_fired(int id, CmdResult *r)
+{
+    memset(r, 0, sizeof *r);
+    int i = id - TIMER_ID_BASE;
+    if (i < 0 || i >= MAX_TIMERS || !s_timers[i].used) return;
+    Timer *t = &s_timers[i];
+    t->used = false;
+    if (s_notify) KillTimer(s_notify, id);
+    wchar_t d[96];
+    dur_text(t->secs, d, 96);
+    if (t->reminder) reply(r, L"Reminder: %ls.", t->label[0] ? t->label : L"that's it");
+    else if (t->label[0]) reply(r, L"Time's up: %ls.", t->label);
+    else reply(r, L"Time's up. Your %ls timer is done.", d);
+    memset(&r->rows[0], 0, sizeof(Row));
+    r->rows[0].kind = ROW_INFO;
+    str_copy(r->rows[0].title, MAX_PATH, t->reminder ? L"Reminder" : L"Time's up");
+    str_copy(r->rows[0].sub, MAX_PATH, t->label[0] ? t->label : d);
+    r->nrows = 1;
+    r->rows_replace = true;
+    r->speak = true;
+    s_nrows = 0;
+    log_line(L"timer: %ls", r->reply);
+}
+
+int cmd_timers_active(void) { return timers_active(); }
+
+/* ---- calculator */
+typedef struct { wchar_t (*w)[64]; int n, i, ops; bool err; } Calc;
+
+static bool cw(Calc *c, const wchar_t *word) { return c->i < c->n && str_eq(c->w[c->i], word); }
+static bool cw2(Calc *c, const wchar_t *a, const wchar_t *b)
+{
+    return c->i + 1 < c->n && str_eq(c->w[c->i], a) && str_eq(c->w[c->i + 1], b);
+}
+
+static double p_expr(Calc *c);
+
+static double p_unary(Calc *c)
+{
+    if (c->err) return 0;
+    if (cw2(c, L"square", L"root")) {
+        c->i += 2;
+        if (cw(c, L"of")) c->i++;
+        c->ops++;
+        double v = p_unary(c);
+        if (v < 0) { c->err = true; return 0; }
+        return sqrt(v);
+    }
+    if (cw(c, L"sqrt") || cw(c, L"root")) { c->i++; if (cw(c, L"of")) c->i++; c->ops++; return sqrt(p_unary(c)); }
+    if (cw(c, L"minus") || cw(c, L"negative")) { c->i++; return -p_unary(c); }
+    if (cw(c, L"open") && c->i + 1 < c->n && str_eq(c->w[c->i + 1], L"bracket")) c->i += 2;
+    if (cw(c, L"pi")) { c->i++; return 3.14159265358979; }
+    double v;
+    int u = read_number(c->w, c->n, c->i, &v);
+    if (!u) { c->err = true; return 0; }
+    c->i += u;
+    if (cw(c, L"close") && c->i + 1 < c->n && str_eq(c->w[c->i + 1], L"bracket")) c->i += 2;
+    return v;
+}
+
+static double p_power(Calc *c)
+{
+    double v = p_unary(c);
+    for (;;) {
+        if (c->err) return 0;
+        if (cw(c, L"squared")) { c->i++; c->ops++; v = v * v; }
+        else if (cw(c, L"cubed")) { c->i++; c->ops++; v = v * v * v; }
+        else if (cw2(c, L"to", L"the") && c->i + 3 < c->n && str_eq(c->w[c->i + 2], L"power") && str_eq(c->w[c->i + 3], L"of")) {
+            c->i += 4; c->ops++; v = pow(v, p_unary(c));
+        } else if (cw(c, L"power")) { c->i++; if (cw(c, L"of")) c->i++; c->ops++; v = pow(v, p_unary(c)); }
+        else if (cw(c, L"percent") || cw(c, L"%")) {
+            c->i++; c->ops++;
+            if (cw(c, L"of")) { c->i++; v = v / 100 * p_power(c); }
+            else v = v / 100;
+        } else return v;
+    }
+}
+
+static double p_term(Calc *c)
+{
+    double v = p_power(c);
+    for (;;) {
+        if (c->err) return 0;
+        if (cw(c, L"times") || cw(c, L"x") || cw(c, L"multiplied") || cw(c, L"multiply") || cw(c, L"by")) {
+            c->i++; if (cw(c, L"by")) c->i++;
+            c->ops++; v *= p_power(c);
+        } else if (cw(c, L"divided") || cw(c, L"over") || cw(c, L"divide")) {
+            c->i++; if (cw(c, L"by")) c->i++;
+            c->ops++;
+            double d = p_power(c);
+            if (d == 0) { c->err = true; return 0; }
+            v /= d;
+        } else if (cw(c, L"mod") || cw(c, L"modulo")) {
+            c->i++; c->ops++;
+            double d = p_power(c);
+            if (d == 0) { c->err = true; return 0; }
+            v = fmod(v, d);
+        } else return v;
+    }
+}
+
+static double p_expr(Calc *c)
+{
+    double v = p_term(c);
+    for (;;) {
+        if (c->err) return 0;
+        if (cw(c, L"plus") || cw(c, L"add") || cw(c, L"and") || cw(c, L"added")) {
+            c->i++; if (cw(c, L"to")) c->i++;
+            c->ops++; v += p_term(c);
+        } else if (cw(c, L"minus") || cw(c, L"subtract") || cw(c, L"less") || cw2(c, L"take", L"away")) {
+            c->i += cw2(c, L"take", L"away") ? 2 : 1;
+            c->ops++; v -= p_term(c);
+        } else return v;
+    }
+}
+
+static void num_text(double v, wchar_t *out, size_t cap)
+{
+    if (fabs(v) < 1e15 && fabs(v - floor(v + 0.5)) < 1e-9) swprintf(out, cap, L"%.0f", floor(v + 0.5));
+    else {
+        swprintf(out, cap, L"%.4f", v);
+        size_t n = wcslen(out);
+        while (n && out[n - 1] == L'0') out[--n] = 0;
+        if (n && out[n - 1] == L'.') out[--n] = 0;
+    }
+}
+
+static bool try_calc(const wchar_t *s, CmdResult *r)
+{
+    static WList LEAD = { L"what's", L"whats", L"what is", L"calculate", L"compute", L"how much is", L"what does",
+        L"tell me", L"solve", L"evaluate", L"work out", L"math", L"calc", NULL };
+    wchar_t t[S_CAP], e[S_CAP] = L"";
+    str_copy(t, S_CAP, s);
+    bool lead = false;
+    while (cut_prefixes(t, LEAD)) lead = true;
+    cut_suffix(t, L"equal");
+    cut_suffix(t, L"equals");
+    cut_suffix(t, L"equal to");
+    if (!t[0]) return false;
+    /* "2+2", "12/4", "2^8" came through as single tokens */
+    for (const wchar_t *p = t; *p; p++) {
+        if (*p == L'+') str_cat(e, S_CAP, L" plus ");
+        else if (*p == L'/') str_cat(e, S_CAP, L" divided by ");
+        else if (*p == L'-' && p > t && iswdigit(p[-1])) str_cat(e, S_CAP, L" minus ");
+        else if (*p == L'^') str_cat(e, S_CAP, L" power ");
+        else { wchar_t c[2] = { *p, 0 }; str_cat(e, S_CAP, c); }
+    }
+    static wchar_t w[48][64];
+    Calc c = { w, split_words(e, w, 48), 0, 0, false };
+    if (!c.n) return false;
+    /* must look like arithmetic: a number first (or a root), and an operator somewhere */
+    double v = p_expr(&c);
+    if (c.err || c.i != c.n || c.ops == 0) {
+        if (c.err && lead && c.ops > 0) { reply(r, L"I can't work that one out."); record(L"SAY"); return true; }
+        return false;
+    }
+    wchar_t num[64], expr[S_CAP];
+    num_text(v, num, 64);
+    join_words(w, 0, c.n, expr, S_CAP);
+    if (wcslen(expr) > 120) expr[120] = 0;
+    reply(r, L"%ls is %ls.", expr, num);
+    r->reply[0] = (wchar_t)towupper(r->reply[0]);
+    record(L"SAY");
+    return true;
+}
+
+/* ---- media keys, volume level */
+static bool try_media(const wchar_t *s, CmdResult *r)
+{
+    static WList PLAY_W = { L"play", L"resume", L"play music", L"resume music", L"play the music", L"resume the music",
+        L"continue playing", L"play pause", L"pause", L"pause music", L"pause the music", L"pause it", L"pause that",
+        L"toggle play", L"unpause", L"pause the song", L"play the song", L"resume playback", L"keep playing", NULL };
+    static WList NEXT_W = { L"next", L"next song", L"next track", L"skip", L"skip song", L"skip this song",
+        L"skip track", L"skip this", L"skip this track", L"play the next song", L"next one", L"play next", NULL };
+    static WList PREV_W = { L"previous", L"previous song", L"previous track", L"last song", L"last track",
+        L"go back a song", L"back a track", L"play the previous song", L"play the last song", L"back", L"go back", NULL };
+    static WList STOP_W = { L"stop music", L"stop the music", L"stop playing", L"stop playback", L"stop the song",
+        L"stop the video", L"stop video", NULL };
+    const wchar_t *what = in_list(s, PLAY_W) ? L"play_pause" : in_list(s, NEXT_W) ? L"next"
+                        : in_list(s, PREV_W) ? L"previous" : in_list(s, STOP_W) ? L"stop" : NULL;
+    if (!what) return false;
+    record(L"SYS media_%ls", what);
+    if (!s_dry) sys_media(what);
+    reply(r, L"Okay.");
+    r->ack = true;
+    s_nrows = 0;
+    return true;
+}
+
+static bool try_volume(const wchar_t *s, CmdResult *r)
+{
+    static WList QUERY = { L"what's the volume", L"whats the volume", L"what is the volume", L"volume level",
+        L"current volume", L"how loud is it", L"volume status", L"what's the volume at", L"what volume is it",
+        L"how loud is the volume", L"check the volume", L"check volume", L"the volume", L"volume", NULL };
+    if (in_list(s, QUERY)) {
+        int pct = 0;
+        bool muted = false;
+        record(L"SAY");
+        if (s_dry) { reply(r, L"The volume is at 50 percent."); return true; }   /* no device in tests */
+        if (!sys_volume_get(&pct, &muted)) { reply(r, L"I can't read the volume."); return true; }
+        reply(r, L"The volume is at %d percent%ls.", pct, muted ? L", muted" : L"");
+        return true;
+    }
+    wchar_t t[S_CAP];
+    str_copy(t, S_CAP, s);
+    static WList LEAD = { L"set", L"change", L"turn", L"put", L"adjust", L"make", L"the", L"my", L"system", NULL };
+    while (cut_prefixes(t, LEAD)) {}
+    static WList VOL = { L"volume", L"sound", L"audio", L"speaker volume", L"the volume", L"sound level", NULL };
+    static WList TAIL_VOL = { L"percent volume", L"volume", L"percent", NULL };
+    int pct = -1;
+    if (cut_prefixes(t, VOL)) {
+        static WList TO = { L"to", L"at", L"level", L"up to", L"down to", L"on", L"of", NULL };
+        while (cut_prefixes(t, TO)) {}
+        cut_suffix(t, L"percent");
+        cut_suffix(t, L"%");
+        if (str_eq(t, L"max") || str_eq(t, L"maximum") || str_eq(t, L"full") || str_eq(t, L"all the way up") ||
+            str_eq(t, L"the max") || str_eq(t, L"100")) pct = 100;
+        else if (str_eq(t, L"half") || str_eq(t, L"halfway") || str_eq(t, L"medium") || str_eq(t, L"the middle")) pct = 50;
+        else if (str_eq(t, L"off") || str_eq(t, L"zero") || str_eq(t, L"nothing") || str_eq(t, L"minimum") || str_eq(t, L"min")) pct = 0;
+        else if (str_eq(t, L"low") || str_eq(t, L"quiet")) pct = 20;
+        else if (str_eq(t, L"high") || str_eq(t, L"loud")) pct = 80;
+        else {
+            wchar_t w[8][64];
+            int n = split_words(t, w, 8);
+            double v;
+            int u = n ? read_number(w, n, 0, &v) : 0;
+            if (u && u == n) pct = (int)(v + 0.5);
+        }
+    } else {
+        /* "50 percent volume", "half volume", "max volume", "full volume" */
+        wchar_t u[S_CAP];
+        str_copy(u, S_CAP, t);
+        bool had = false;
+        for (const wchar_t *const *p = TAIL_VOL; *p && !had; p++) had = cut_suffix(u, *p) && (str_ends(t, L"volume"));
+        if (!had) return false;
+        if (str_eq(u, L"max") || str_eq(u, L"maximum") || str_eq(u, L"full")) pct = 100;
+        else if (str_eq(u, L"half")) pct = 50;
+        else if (str_eq(u, L"no") || str_eq(u, L"zero")) pct = 0;
+        else {
+            wchar_t w[8][64];
+            int n = split_words(u, w, 8);
+            double v;
+            int k = n ? read_number(w, n, 0, &v) : 0;
+            if (k && k == n) pct = (int)(v + 0.5);
+        }
+    }
+    if (pct < 0) return false;
+    if (pct > 100) pct = 100;
+    record(L"SYS volume=%d", pct);
+    if (!s_dry && !sys_volume_set(pct)) { reply(r, L"I couldn't change the volume."); return true; }
+    reply(r, L"Volume %d percent.", pct);
+    r->ack = true;
+    s_nrows = 0;
+    return true;
+}
+
+/* ---- sleep / shut down / restart / sign out, empty the Recycle Bin: after a yes */
+typedef enum { ASK_NONE, ASK_POWER, ASK_RECYCLE } AskKind;
+static AskKind s_ask;
+static wchar_t s_ask_what[16];
+
+static const wchar_t *power_question(const wchar_t *what)
+{
+    if (str_eq(what, L"shutdown")) return L"Shut down the PC?";
+    if (str_eq(what, L"restart")) return L"Restart the PC?";
+    if (str_eq(what, L"sleep")) return L"Put the PC to sleep?";
+    if (str_eq(what, L"hibernate")) return L"Hibernate the PC?";
+    return L"Sign out of Windows?";
+}
+
+static bool run_ask_answer(const wchar_t *s, CmdResult *r)
+{
+    AskKind k = s_ask;
+    s_ask = ASK_NONE;
+    bool yes = in_list(s, ASK_YES), no = in_list(s, ASK_NO);
+    if (!yes && !no) return false;   /* something else: run it as a new command */
+    if (no) { reply(r, L"Okay, I won't."); record(L"SAY"); done(r); r->ack = false; return true; }
+    if (k == ASK_RECYCLE) {
+        record(L"SYS empty_recycle_bin");
+        if (!s_dry && !sys_empty_recycle_bin()) reply(r, L"I couldn't empty the Recycle Bin.");
+        else reply(r, L"The Recycle Bin is empty.");
+        done(r);
+        r->ack = false;
+        return true;
+    }
+    record(L"SYS %ls", s_ask_what);
+    if (!s_dry && !sys_power(s_ask_what)) { reply(r, L"That didn't work."); return true; }
+    if (str_eq(s_ask_what, L"shutdown")) reply(r, L"Shutting down.");
+    else if (str_eq(s_ask_what, L"restart")) reply(r, L"Restarting.");
+    else if (str_eq(s_ask_what, L"sleep")) reply(r, L"Going to sleep.");
+    else if (str_eq(s_ask_what, L"hibernate")) reply(r, L"Hibernating.");
+    else reply(r, L"Signing out.");
+    done(r);
+    r->ack = false;
+    r->quit = !str_eq(s_ask_what, L"sleep") && !str_eq(s_ask_what, L"hibernate");
+    return true;
+}
+
+static bool try_power(const wchar_t *s, CmdResult *r)
+{
+    static WList SHUT_W = { L"shut down", L"shutdown", L"shut down the pc", L"shut down the computer", L"shut down my pc",
+        L"shut down my computer", L"shut down the laptop", L"shut down my laptop", L"turn off the pc", L"turn off the computer",
+        L"turn off my pc", L"turn off my computer", L"turn off the laptop", L"turn off my laptop", L"power off",
+        L"power off the pc", L"switch off the computer", L"switch off the pc", L"turn off this pc", L"shut the pc down",
+        L"shut the computer down", L"turn the computer off", L"turn the pc off", L"shut down windows", L"shut down the system", NULL };
+    static WList RESTART_W = { L"restart", L"reboot", L"restart the pc", L"restart the computer", L"restart my pc",
+        L"restart my computer", L"reboot the pc", L"reboot the computer", L"restart the laptop", L"restart my laptop",
+        L"restart windows", L"reboot windows", L"reboot my pc", L"reboot my computer", L"restart the system", NULL };
+    static WList SLEEP_W = { L"sleep", L"go to sleep", L"sleep mode", L"put the pc to sleep", L"put the computer to sleep",
+        L"put my pc to sleep", L"put my computer to sleep", L"put the laptop to sleep", L"put my laptop to sleep",
+        L"sleep the pc", L"sleep the computer", L"sleep now", L"suspend", L"go to sleep mode", L"enter sleep mode", NULL };
+    static WList HIB_W = { L"hibernate", L"hibernate the pc", L"hibernate the computer", L"hibernate my pc",
+        L"hibernate my computer", L"hibernate the laptop", L"hibernate my laptop", NULL };
+    static WList SIGNOUT_W = { L"sign out", L"log out", L"log off", L"logout", L"logoff", L"sign me out", L"log me out",
+        L"sign out of windows", L"log out of windows", L"sign off", NULL };
+    static WList ABORT_W = { L"cancel shutdown", L"cancel the shutdown", L"abort shutdown", L"abort the shutdown",
+        L"cancel restart", L"cancel the restart", L"don't shut down", L"dont shut down", L"stop the shutdown",
+        L"stop shutdown", L"cancel the reboot", L"don't restart", L"dont restart", NULL };
+    static WList EMPTY_W = { L"empty the recycle bin", L"empty recycle bin", L"empty the trash", L"empty trash",
+        L"empty the bin", L"clear the recycle bin", L"clear recycle bin", L"take out the trash", L"empty my recycle bin",
+        L"clean the recycle bin", L"clean out the recycle bin", NULL };
+    if (in_list(s, ABORT_W)) {
+        record(L"SYS abort");
+        if (!s_dry) sys_power(L"abort");
+        reply(r, L"Cancelled the shutdown.");
+        done(r);
+        return true;
+    }
+    if (in_list(s, EMPTY_W)) {
+        s_ask = ASK_RECYCLE;
+        record(L"ASK empty_recycle_bin");
+        reply(r, L"Empty the Recycle Bin? Everything in it is gone for good. Say yes or no.");
+        r->listen_again = true;
+        s_nrows = 0;
+        return true;
+    }
+    const wchar_t *what = in_list(s, SHUT_W) ? L"shutdown" : in_list(s, RESTART_W) ? L"restart"
+                        : in_list(s, SLEEP_W) ? L"sleep" : in_list(s, HIB_W) ? L"hibernate"
+                        : in_list(s, SIGNOUT_W) ? L"signout" : NULL;
+    if (!what) return false;
+    s_ask = ASK_POWER;
+    str_copy(s_ask_what, 16, what);
+    record(L"ASK %ls", what);
+    reply(r, L"%ls Say yes or no.", power_question(what));
+    r->listen_again = true;
+    s_nrows = 0;
+    return true;
+}
+
+/* ---- notes: "note buy milk" -> Documents\JARVIS notes.txt */
+static void notes_path(wchar_t *out)
+{
+    const wchar_t *docs = kv_get(&g_cfg.folders, L"documents");
+    swprintf(out, MAX_PATH, L"%ls\\JARVIS notes.txt", docs && path_is_dir(docs) ? docs : g_cfg.data_dir);
+}
+
+static bool try_notes(const wchar_t *s, CmdResult *r)
+{
+    static WList SHOW = { L"notes", L"my notes", L"show notes", L"show my notes", L"read my notes", L"read notes",
+        L"read the notes", L"what are my notes", L"list notes", L"list my notes", L"show the notes", L"what did i note",
+        L"what did i note down", L"what did i write down", L"my memos", L"show me my notes", L"last note", L"my last note",
+        L"what was my last note", NULL };
+    static WList OPEN = { L"open notes", L"open my notes", L"open the notes", L"open notes file", L"edit notes",
+        L"edit my notes", L"open the notes file", L"open jarvis notes", NULL };
+    static WList LEAD = { L"note to self", L"take a note", L"take note", L"make a note", L"write a note", L"write down",
+        L"write this down", L"note down", L"jot down", L"note that", L"note", L"remember that", L"remember this",
+        L"remember", L"add a note", L"add note", L"new note", L"save a note", L"save note", L"memo", L"keep a note", NULL };
+    wchar_t path[MAX_PATH];
+    notes_path(path);
+    if (in_list(s, OPEN)) {
+        if (!path_exists(path)) { reply(r, L"You have no notes yet. Say: note, and then what to remember."); record(L"SAY"); return true; }
+        act_open(path);
+        reply(r, L"Here are your notes.");
+        done(r);
+        return true;
+    }
+    if (in_list(s, SHOW)) {
+        s_nrows = 0;
+        r->rows_replace = true;
+        HANDLE h = CreateFileW(path, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+        if (h == INVALID_HANDLE_VALUE) { reply(r, L"You have no notes yet. Say: note, and then what to remember."); record(L"SAY"); return true; }
+        DWORD size = GetFileSize(h, NULL), rd = 0;
+        char *buf = size < 4u * 1024 * 1024 ? malloc(size + 1) : NULL;
+        if (buf) ReadFile(h, buf, size, &rd, NULL);
+        CloseHandle(h);
+        if (!buf) { reply(r, L"I couldn't read your notes."); record(L"SAY"); return true; }
+        buf[rd] = 0;
+        wchar_t *all = wide_from_utf8(buf + (rd >= 3 && (unsigned char)buf[0] == 0xEF ? 3 : 0), -1);
+        free(buf);
+        /* last MAX_HITS lines, newest first */
+        wchar_t *lines[64];
+        int nl = 0;
+        for (wchar_t *ctx = NULL, *t = all ? wcstok(all, L"\r\n", &ctx) : NULL; t; t = wcstok(NULL, L"\r\n", &ctx)) {
+            str_trim(t);
+            if (!t[0]) continue;
+            if (nl < 64) lines[nl++] = t;
+            else { memmove(lines, lines + 1, 63 * sizeof(wchar_t *)); lines[63] = t; }
+        }
+        int n = 0;
+        for (int i = nl - 1; i >= 0 && n < MAX_HITS; i--, n++) {
+            memset(&r->rows[n], 0, sizeof(Row));
+            r->rows[n].kind = ROW_INFO;
+            const wchar_t *text = lines[i];
+            /* "2026-11-03 19:40  text" */
+            if (wcslen(text) > 18 && text[4] == L'-' && text[16] == L' ') {
+                str_copy(r->rows[n].sub, MAX_PATH, text);
+                r->rows[n].sub[16] = 0;
+                text += 17;
+                while (*text == L' ') text++;
+            }
+            str_copy(r->rows[n].title, MAX_PATH, text);
+        }
+        r->nrows = n;
+        free(all);
+        if (!n) { reply(r, L"You have no notes yet."); record(L"SAY"); return true; }
+        record(L"LIST %d", n);
+        reply(r, L"Your last note: %ls.", r->rows[0].title);
+        return true;
+    }
+    wchar_t t[S_CAP];
+    str_copy(t, S_CAP, s);
+    if (!cut_prefixes(t, LEAD)) return false;
+    cut_prefixes(t, (WList){ L"that", L"to", L":", NULL });
+    str_trim(t);
+    if (!t[0]) { reply(r, L"What should I note down?"); record(L"SAY"); r->listen_again = true; return true; }
+    {   /* keep the note as typed / heard (casing, punctuation): from its first word to the end */
+        wchar_t first[64];
+        const wchar_t *sp = wcschr(t, L' ');
+        size_t fl = sp ? (size_t)(sp - t) : wcslen(t);
+        if (fl > 63) fl = 63;
+        memcpy(first, t, fl * sizeof(wchar_t)); first[fl] = 0;
+        for (const wchar_t *p = s_orig; *p; p++) {
+            bool start = p == s_orig || !iswalnum(p[-1]);
+            if (start && _wcsnicmp(p, first, fl) == 0 && !iswalnum(p[fl])) {
+                str_copy(t, S_CAP, p);
+                str_trim(t);
+                size_t n = wcslen(t);
+                while (n && (t[n - 1] == L'.' || t[n - 1] == L',' || t[n - 1] == L'!')) t[--n] = 0;
+                break;
+            }
+        }
+    }
+    record(L"NOTE %ls", t);
+    if (!s_dry) {
+        HANDLE h = CreateFileW(path, FILE_APPEND_DATA, FILE_SHARE_READ, NULL, OPEN_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+        if (h == INVALID_HANDLE_VALUE) { reply(r, L"I couldn't write to %ls.", path); return true; }
+        SYSTEMTIME st;
+        GetLocalTime(&st);
+        wchar_t line[S_CAP + 32];
+        swprintf(line, S_CAP + 32, L"%04d-%02d-%02d %02d:%02d  %ls\r\n", st.wYear, st.wMonth, st.wDay, st.wHour, st.wMinute, t);
+        char *u8 = utf8_from_wide(line);
+        DWORD wr;
+        if (u8) { WriteFile(h, u8, (DWORD)strlen(u8), &wr, NULL); free(u8); }
+        CloseHandle(h);
+    }
+    reply(r, L"Noted: %ls.", t);
+    r->ack = true;
+    s_nrows = 0;
+    return true;
+}
+
+/* ---- "repeat that" */
+static bool try_repeat(const wchar_t *s, CmdResult *r)
+{
+    static WList REPEAT_W = { L"repeat that", L"repeat", L"say that again", L"say it again", L"say again", L"again",
+        L"what did you say", L"pardon", L"sorry what", L"come again", L"what was that", L"one more time",
+        L"repeat please", L"can you repeat that", L"could you repeat that", L"what", L"huh", L"i didn't hear you",
+        L"i didn't catch that", L"i didnt catch that", L"i didnt hear you", NULL };
+    if (!in_list(s, REPEAT_W)) return false;
+    record(L"SAY");
+    if (!s_last_reply[0]) reply(r, L"I haven't said anything yet.");
+    else { str_copy(r->reply, 300, s_last_reply); r->speak = true; }
+    r->rows_replace = false;   /* keep whatever list is up */
+    return true;
+}
+
+static bool run_extras(const wchar_t *s, CmdResult *r)
+{
+    return try_repeat(s, r) || try_timer(s, r) || try_media(s, r) || try_volume(s, r) ||
+           try_power(s, r) || try_calc(s, r) || try_notes(s, r);
+}
+
 /* ----------------------------------------------------- picking from a list */
 /* "two", "number 3", "the second one", "open 2", "show the first one in folder".
  * Returns row number (1-based) or 0; *reveal set for "in folder" style picks. */
@@ -1131,8 +1889,6 @@ static Plan    s_plan;                   /* waiting for a pick from the list */
 static bool    s_plan_wait;
 static bool    s_del_wait;               /* asked "move X to the Recycle Bin?" */
 static wchar_t s_del[MAX_PATH];
-static HWND    s_notify;
-static wchar_t s_orig[S_CAP];            /* the command as typed (for name casing) */
 
 static void set_last(const wchar_t *p)
 {
@@ -2068,7 +2824,15 @@ static bool try_browser(const wchar_t *s, CmdResult *r)
     return true;
 }
 
+static void cmd_run_inner(const wchar_t *text, CmdResult *r);
+
 void cmd_run(const wchar_t *text, CmdResult *r)
+{
+    cmd_run_inner(text, r);
+    if (r->reply[0]) str_copy(s_last_reply, 300, r->reply);   /* for "repeat that" */
+}
+
+static void cmd_run_inner(const wchar_t *text, CmdResult *r)
 {
     memset(r, 0, sizeof *r);
     r->speak = true;
@@ -2084,6 +2848,9 @@ void cmd_run(const wchar_t *text, CmdResult *r)
     log_line(L"cmd: %ls", s);
     str_copy(s_orig, S_CAP, text);
 
+    /* answer to "Shut down the PC? Say yes or no." */
+    if (s_ask != ASK_NONE && run_ask_answer(s, r)) return;
+    s_ask = ASK_NONE;
     /* answer to "Move X to the Recycle Bin? Say yes or no." */
     if (s_del_wait && run_delete_answer(s, r)) return;
     s_del_wait = false;
@@ -2122,6 +2889,7 @@ void cmd_run(const wchar_t *text, CmdResult *r)
         }
     }
     if (run_fixed(s, r)) return;
+    if (run_extras(s, r)) return;
 
     /* an exact configured name wins over everything ("google drive", "youtube") */
     {
