@@ -8,10 +8,17 @@
  * dialog in front keeps it. The bar appears only when it is needed (a list
  * to pick from, voice unavailable, or "show window").
  *
+ * stay_open=1 (default): JARVIS stays until the user closes it (Esc, the x
+ * button, Alt+F4, or saying "close" / "exit" / "bye"). The bar stops being
+ * topmost while another app is active, so what it opened isn't covered. In
+ * background mode the process idles with a tray icon; the Copilot key wakes it.
+ * stay_open=0: close after each answer (and when the bar loses focus).
+ *
  * Plain GDI, double buffered. The mic dot is drawn at 3x into a small DIB
  * and scaled down with HALFTONE for cheap anti-aliasing. A timer runs only
- * while listening, and the process exits as soon as the work is done. */
+ * while listening; idle there are no timers and no polling. */
 #include "jarvis.h"
+#include <shellapi.h>
 #include <commctrl.h>
 #include <dwmapi.h>
 #include <math.h>
@@ -47,6 +54,7 @@
 #define L_PILL_MAX   460
 #define L_PILL_SHADE 10        /* room around the pill for its soft shadow */
 #define L_PILL_LIFT  64        /* distance from the bottom of the work area */
+#define L_CLOSE_W    30        /* the x button at the right of the input row */
 
 /* timers */
 #define T_ANIM     1
@@ -63,6 +71,10 @@
 #define EDIT_ID        100
 #define WM_APP_CLOSE   (WM_APP + 20)
 #define WM_APP_NORMAL  (WM_APP + 21)   /* pill clicked: show the bar */
+#define WM_APP_TRAY    (WM_APP + 22)   /* tray icon mouse event */
+#define TRAY_ID        1
+#define TRAY_SHOW      1
+#define TRAY_EXIT      2
 
 enum { ST_IDLE, ST_HINT, ST_REPLY };
 enum { MP_NONE, MP_HIDE, MP_SHOW };
@@ -80,7 +92,7 @@ static struct {
     UINT  dpi;
     RECT  work;                 /* work area of our monitor */
 
-    HFONT fEdit, fName, fSmall, fStatus, fIcon;
+    HFONT fEdit, fName, fSmall, fStatus, fIcon, fClose;
     HBRUSH brBg;
 
     /* mic dot offscreen (3x) */
@@ -109,6 +121,12 @@ static struct {
 
     bool  close_pending, close_min_done, close_spoken;
     bool  tracking;
+
+    bool  stay;                 /* stay_open: run until the user closes JARVIS */
+    bool  from_voice;           /* the command being run was spoken */
+    bool  close_hover;          /* mouse over the x button */
+    bool  tray;                 /* tray icon added */
+    UINT  msg_taskbar;          /* "TaskbarCreated": explorer restarted */
 } g;
 
 static CmdResult g_res;   /* big: keep it off the stack */
@@ -194,6 +212,22 @@ static RECT dot_rect(void)
     return r;
 }
 
+/* the x button (stay_open only; with stay_open=0 the bar closes by itself) */
+static bool has_close_btn(void) { return g.stay; }
+
+static RECT close_rect(void)
+{
+    int sz = S(L_CLOSE_W), r = S(L_W) - S(10), t = (S(L_INPUT_H) - sz) / 2;
+    RECT rc = { r - sz, t, r, t + sz };
+    return rc;
+}
+
+/* right edge of the edit / upload label */
+static int input_right(void)
+{
+    return has_close_btn() ? close_rect().left - S(8) : S(L_W - L_PAD_R);
+}
+
 static RECT status_rect(void)
 {
     RECT r = { S(L_EDIT_X), S(L_INPUT_H - 8), S(L_W - L_PAD_R), S(L_INPUT_H - 8 + L_STATUS_H) };
@@ -232,7 +266,7 @@ static HFONT mkfont(const wchar_t *face, int px, int weight, const wchar_t *fall
 
 static void free_fonts(void)
 {
-    HFONT *fs[] = { &g.fEdit, &g.fName, &g.fSmall, &g.fStatus, &g.fIcon };
+    HFONT *fs[] = { &g.fEdit, &g.fName, &g.fSmall, &g.fStatus, &g.fIcon, &g.fClose };
     for (size_t i = 0; i < sizeof fs / sizeof fs[0]; i++)
         if (*fs[i]) { DeleteObject(*fs[i]); *fs[i] = NULL; }
 }
@@ -257,6 +291,7 @@ static void make_resources(void)
     g.fStatus = mkfont(UI_FONT, 13, FW_NORMAL, L"Segoe UI");
     g.fSmall  = mkfont(UI_FONT, 12, FW_NORMAL, L"Segoe UI");
     g.fIcon   = mkfont(L"Segoe Fluent Icons", 14, FW_NORMAL, L"Segoe MDL2 Assets");
+    g.fClose  = mkfont(L"Segoe Fluent Icons", 10, FW_NORMAL, L"Segoe MDL2 Assets");
     free_dot();
 }
 
@@ -286,7 +321,7 @@ static void layout_edit(void)
     ReleaseDC(g.edit, dc);
     int h = tm.tmHeight + 2;
     int x = S(L_EDIT_X);
-    int right = S(L_W - L_PAD_R);
+    int right = input_right();
     if (g.dialog) right -= text_w(g.fSmall, UPLOAD_LABEL) + S(16);
     SetWindowPos(g.edit, NULL, x, (S(L_INPUT_H) - h) / 2, right - x, h, SWP_NOZORDER | SWP_NOACTIVATE);
 }
@@ -497,8 +532,14 @@ static void paint_all(HDC dc, int w, int h)
     render_dot(dc, d.left, d.top, T.bg);
 
     if (g.dialog) {
-        RECT ur = { S(L_EDIT_X), 0, S(L_W - L_PAD_R), S(L_INPUT_H) };
+        RECT ur = { S(L_EDIT_X), 0, input_right(), S(L_INPUT_H) };
         text_at(dc, g.fSmall, T.dim, UPLOAD_LABEL, &ur, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
+    }
+
+    if (has_close_btn()) {
+        RECT cr = close_rect();
+        if (g.close_hover) fill_round(dc, &cr, S(6), T.sel);
+        text_at(dc, g.fClose, g.close_hover ? T.text : T.dim, L"\xE711", &cr, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
     }
 
     if (g.status[0]) {
@@ -669,6 +710,47 @@ static LRESULT CALLBACK pill_proc(HWND h, UINT m, WPARAM w, LPARAM l)
     return DefWindowProcW(h, m, w, l);
 }
 
+/* ---------------------------------------------------------------- tray */
+/* Background mode with stay_open: a tray icon shows JARVIS is still running. */
+static void tray_set(bool on)
+{
+    NOTIFYICONDATAW nid = { .cbSize = sizeof nid, .hWnd = g.hwnd, .uID = TRAY_ID };
+    if (!on) {
+        if (g.tray) Shell_NotifyIconW(NIM_DELETE, &nid);
+        g.tray = false;
+        return;
+    }
+    if (g.tray || !g.hwnd) return;
+    nid.uFlags = NIF_MESSAGE | NIF_ICON | NIF_TIP;
+    nid.uCallbackMessage = WM_APP_TRAY;
+    nid.hIcon = (HICON)LoadImageW(g.inst, MAKEINTRESOURCEW(1), IMAGE_ICON, GetSystemMetrics(SM_CXSMICON),
+                                  GetSystemMetrics(SM_CYSMICON), LR_SHARED);
+    if (!nid.hIcon) nid.hIcon = LoadIconW(NULL, IDI_APPLICATION);
+    str_copy(nid.szTip, sizeof nid.szTip / sizeof nid.szTip[0], L"JARVIS \x2014 background");
+    g.tray = Shell_NotifyIconW(NIM_ADD, &nid) != FALSE;
+}
+
+static void tray_update(void)
+{
+    tray_set(g.stay && g.bg && !g.closing && g.hwnd);
+}
+
+static void tray_menu(void)
+{
+    HMENU m = CreatePopupMenu();
+    if (!m) return;
+    AppendMenuW(m, MF_STRING, TRAY_SHOW, L"Show");
+    AppendMenuW(m, MF_STRING, TRAY_EXIT, L"Exit");
+    POINT pt;
+    GetCursorPos(&pt);
+    SetForegroundWindow(g.hwnd);   /* so the menu closes when clicking elsewhere */
+    int cmd = TrackPopupMenu(m, TPM_RETURNCMD | TPM_RIGHTBUTTON | TPM_NONOTIFY, pt.x, pt.y, 0, g.hwnd, NULL);
+    PostMessageW(g.hwnd, WM_NULL, 0, 0);
+    DestroyMenu(m);
+    if (cmd == TRAY_SHOW) PostMessageW(g.hwnd, WM_APP_NORMAL, 0, 0);
+    else if (cmd == TRAY_EXIT) PostMessageW(g.hwnd, WM_CLOSE, 0, 0);
+}
+
 /* ----------------------------------------------------------- animation */
 static void anim_update(void)
 {
@@ -684,6 +766,7 @@ static void state_changed(void)
     anim_update();
     invalidate_dot();
     pill_refresh();
+    tray_update();
 }
 
 /* ------------------------------------------------------------- closing */
@@ -697,6 +780,7 @@ static void begin_close(void)
     KillTimer(g.hwnd, T_CLOSECAP);
     g.anim_on = false;
     pill_hide();
+    tray_set(false);
     ShowWindow(g.hwnd, SW_HIDE);
     PostMessageW(g.hwnd, WM_APP_CLOSE, 0, 0);
 }
@@ -852,19 +936,26 @@ static void apply_result(CmdResult *r)
 
     bool spoke = false;
     bool speak = r->speak || (g.bg && r->reply[0]);   /* hidden: the voice is the only output */
+    /* stay_open: after a spoken command (or in the background) listen for the
+     * next one once the reply has been said; typed commands don't auto-listen */
+    bool listen = r->listen_again || (g.stay && !r->quit && (g.from_voice || g.bg));
     if (speak) {
-        bool again = r->listen_again && voice_available();
+        bool again = listen && voice_available();
         voice_say(r->reply, again);
         if (again) g.listen_requested = true;
         spoke = g.voice_state >= 0;   /* a voice thread exists to report VE_SPOKEN */
         g.speaking = spoke;
-    } else if (r->listen_again && voice_available()) {
+    } else if (listen && voice_available()) {
         voice_listen(true);
         g.listen_requested = true;
     }
-    /* hidden and nothing more to do: exit after replying */
-    if (r->close || (g.bg && !r->listen_again)) schedule_close(spoke);
-    else if (g.close_pending) cancel_close();
+    if (g.stay) {
+        /* stay open: only an explicit "close" / "exit" ends JARVIS */
+        if (r->quit) schedule_close(spoke);
+        else if (g.close_pending) cancel_close();
+    } else if (r->close || (g.bg && !r->listen_again)) {
+        schedule_close(spoke);   /* hidden and nothing more to do: exit after replying */
+    } else if (g.close_pending) cancel_close();
     state_changed();
 }
 
@@ -1008,6 +1099,9 @@ static LRESULT CALLBACK edit_proc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR i
         }
         break;
     }
+    case WM_SYSKEYDOWN:
+        if (w == VK_F4) { begin_close(); return 0; }   /* Alt+F4 */
+        break;
     case WM_CHAR:
         if (w == L'\r' || w == L'\n' || w == 27) return 0;
         if (w == L' ' && g.ctrl_space) { g.ctrl_space = false; return 0; }
@@ -1072,7 +1166,9 @@ static void on_voice(WPARAM ev, LPARAM lp)
             wchar_t *t = (wchar_t *)lp;
             str_copy(g.hyp, 320, t);
             if (!g.bg) set_edit_text(t);
+            g.from_voice = true;
             run_text(t);
+            g.from_voice = false;
             free(t);
         }
         break;
@@ -1096,13 +1192,21 @@ static void on_voice(WPARAM ev, LPARAM lp)
         break;
     }
     case VE_TIMEOUT:
+        if (g.bg && g.stay) {              /* nothing said: go idle (tray icon only) */
+            g.listening = g.listen_requested = false;
+            g.hyp[0] = 0;
+            set_status(L"", ST_IDLE);
+            state_changed();
+            break;
+        }
         if (g.bg) {                        /* nothing said: just go away quietly */
             log_line(L"close: no speech (background)");
             begin_close();
             break;
         }
         if (g.edit_from_cmd && g.hyp[0] == 0) { set_edit_text(L""); g.edit_from_cmd = false; }
-        set_status(L"Didn't hear anything \x2014 press F2 to talk", ST_HINT);
+        set_status(g.stay ? L"Press F2 or the Copilot key to talk"
+                          : L"Didn't hear anything \x2014 press F2 to talk", ST_HINT);
         break;
     case VE_SPOKEN:
         g.speaking = false;
@@ -1117,6 +1221,11 @@ static void on_voice(WPARAM ev, LPARAM lp)
 
 static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
 {
+    if (g.msg_taskbar && m == g.msg_taskbar) {   /* explorer restarted: re-add the tray icon */
+        g.tray = false;
+        tray_update();
+        return 0;
+    }
     switch (m) {
     case WM_ERASEBKGND:
         return 1;
@@ -1171,6 +1280,11 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
             if (g.listening || g.listen_requested) {
                 voice_listen(false);
                 g.listen_requested = false;
+                if (g.stay) {              /* stay_open: just go idle */
+                    g.hyp[0] = 0;
+                    state_changed();
+                    return 0;
+                }
                 log_line(L"close: toggled off (background)");
                 begin_close();
             } else {
@@ -1178,9 +1292,20 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
             }
             return 0;
         }
+        if (g.stay && GetForegroundWindow() != g.hwnd) {
+            /* behind another app: come back and listen */
+            force_foreground();
+            g.shown_at = GetTickCount();
+            if (!g.listening && !g.listen_requested) ui_toggle_listen();
+            return 0;
+        }
         force_foreground();
         g.shown_at = GetTickCount();
         ui_toggle_listen();
+        return 0;
+    case WM_APP_TRAY:
+        if (l == WM_LBUTTONUP) go_normal();
+        else if (l == WM_RBUTTONUP || l == WM_CONTEXTMENU) tray_menu();
         return 0;
     case WM_APP_NORMAL:
         go_normal();
@@ -1194,6 +1319,25 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         return 0;
     case WM_ACTIVATE:
+        if (g.stay) {
+            /* stay_open: never close on focus loss; just stop covering the
+             * app that took focus (the browser JARVIS just opened...) */
+            if (!g.bg && !g.closing) {
+                UINT f = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+                if (LOWORD(w) == WA_INACTIVE) {
+                    /* NOTOPMOST alone puts us on top of the normal windows,
+                     * i.e. still over the app that just took focus: go behind it */
+                    SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, f);
+                    HWND other = l ? GetAncestor((HWND)l, GA_ROOT) : GetForegroundWindow();
+                    if (other && other != h && !(GetWindowLongW(other, GWL_EXSTYLE) & WS_EX_TOPMOST))
+                        SetWindowPos(h, other, 0, 0, 0, 0, f);
+                } else {
+                    SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, f);
+                }
+            }
+            if (LOWORD(w) != WA_INACTIVE && g.edit) SetFocus(g.edit);
+            return 0;
+        }
         if (LOWORD(w) == WA_INACTIVE) {
             if (!g.bg && !g.closing && GetTickCount() - g.shown_at > GRACE_MS) {
                 wchar_t cls[64] = L"";
@@ -1218,19 +1362,30 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         int r = row_at((short)LOWORD(l), (short)HIWORD(l));
         if (r != g.hover) { g.hover = r; invalidate_rows(); }
+        if (has_close_btn()) {
+            POINT pt = { (short)LOWORD(l), (short)HIWORD(l) };
+            RECT cr = close_rect();
+            bool on = PtInRect(&cr, pt) != FALSE;
+            if (on != g.close_hover) { g.close_hover = on; InvalidateRect(h, &cr, FALSE); }
+        }
         return 0;
     }
     case WM_MOUSELEAVE:
         g.tracking = false;
         if (g.hover >= 0) { g.hover = -1; invalidate_rows(); }
+        if (g.close_hover) {
+            RECT cr = close_rect();
+            g.close_hover = false;
+            InvalidateRect(h, &cr, FALSE);
+        }
         return 0;
     case WM_SETCURSOR:
         if (LOWORD(l) == HTCLIENT) {
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(h, &pt);
-            RECT dr = dot_rect();
-            bool hand = PtInRect(&dr, pt) || row_at(pt.x, pt.y) >= 0;
+            RECT dr = dot_rect(), cr = close_rect();
+            bool hand = PtInRect(&dr, pt) || row_at(pt.x, pt.y) >= 0 || (has_close_btn() && PtInRect(&cr, pt));
             SetCursor(LoadCursorW(NULL, hand ? IDC_HAND : IDC_ARROW));
             return TRUE;
         }
@@ -1239,6 +1394,12 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         POINT pt = { (short)LOWORD(l), (short)HIWORD(l) };
         RECT dr = dot_rect();
         if (PtInRect(&dr, pt)) { ui_toggle_listen(); return 0; }
+        RECT cr = close_rect();
+        if (has_close_btn() && PtInRect(&cr, pt)) {
+            log_line(L"close: x button");
+            begin_close();
+            return 0;
+        }
         int r = row_at(pt.x, pt.y);
         if (r >= 0) {
             g.sel = r;
@@ -1280,6 +1441,7 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         return 0;
     case WM_DESTROY:
         KillTimer(h, T_ANIM);
+        tray_set(false);
         if (g.pill) { DestroyWindow(g.pill); g.pill = NULL; }
         free_fonts();
         free_dot();
@@ -1298,6 +1460,8 @@ bool ui_create(HINSTANCE inst, HWND dialog, bool listen, const wchar_t *initial_
     g.sel = g.hover = -1;
     g.pick_mode = PICK_OPEN;
     g.bg = background;
+    g.stay = g_cfg.stay_open;
+    g.msg_taskbar = RegisterWindowMessageW(L"TaskbarCreated");
 
     WNDCLASSEXW wc = { .cbSize = sizeof wc };
     wc.style = CS_DROPSHADOW;

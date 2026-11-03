@@ -258,12 +258,58 @@ static bool act_dialog(const wchar_t *path)
     return dialog_fill(s_dialog, path);
 }
 
+/* Browsers that can be named in a command ("open youtube in brave").
+ * Longer names first so "google chrome" wins over "chrome". */
+#define CHROME_PATHS {L"%ProgramFiles%\\Google\\Chrome\\Application\\chrome.exe", \
+    L"%ProgramFiles(x86)%\\Google\\Chrome\\Application\\chrome.exe", \
+    L"%LOCALAPPDATA%\\Google\\Chrome\\Application\\chrome.exe"}
+#define EDGE_PATHS {L"%ProgramFiles(x86)%\\Microsoft\\Edge\\Application\\msedge.exe", \
+    L"%ProgramFiles%\\Microsoft\\Edge\\Application\\msedge.exe", NULL}
+#define FIREFOX_PATHS {L"%ProgramFiles%\\Mozilla Firefox\\firefox.exe", \
+    L"%ProgramFiles(x86)%\\Mozilla Firefox\\firefox.exe", NULL}
+#define OPERA_PATHS {L"%LOCALAPPDATA%\\Programs\\Opera\\opera.exe", \
+    L"%LOCALAPPDATA%\\Programs\\Opera GX\\opera.exe", NULL}
+typedef struct { const wchar_t *name, *exe, *disp; const wchar_t *paths[3]; } Browser;
+static const Browser BROWSERS[] = {
+    {L"google chrome", L"chrome.exe", L"Chrome", CHROME_PATHS},
+    {L"chrome", L"chrome.exe", L"Chrome", CHROME_PATHS},
+    {L"brave", L"brave.exe", L"Brave", {L"%LOCALAPPDATA%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+        L"%ProgramFiles%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe",
+        L"%ProgramFiles(x86)%\\BraveSoftware\\Brave-Browser\\Application\\brave.exe"}},
+    {L"microsoft edge", L"msedge.exe", L"Edge", EDGE_PATHS},
+    {L"edge", L"msedge.exe", L"Edge", EDGE_PATHS},
+    {L"mozilla firefox", L"firefox.exe", L"Firefox", FIREFOX_PATHS},
+    {L"firefox", L"firefox.exe", L"Firefox", FIREFOX_PATHS},
+    {L"opera gx", L"opera.exe", L"Opera GX", OPERA_PATHS},
+    {L"opera", L"opera.exe", L"Opera", OPERA_PATHS},
+};
+static const Browser *s_browser;        /* browser named in this command (NULL = configured) */
+static bool s_browser_missing;          /* ...and it isn't installed */
+
+static bool target_exists(const wchar_t *exe);
+
+static bool open_in_browser(const Browser *b, const wchar_t *qurl)
+{
+    if (target_exists(b->exe) && shell_open(b->exe, qurl)) return true;
+    for (int i = 0; i < 3 && b->paths[i]; i++) {
+        wchar_t p[MAX_PATH];
+        expand_env(b->paths[i], p, MAX_PATH);
+        if (!wcschr(p, L'%') && path_exists(p) && shell_open(p, qurl)) return true;
+    }
+    return false;
+}
+
 static bool act_url(const wchar_t *url)
 {
-    record(L"URL %ls", url);
+    if (s_browser) record(L"URL %ls [%ls]", url, s_browser->exe);
+    else record(L"URL %ls", url);
     if (s_dry) return true;
     wchar_t q[ACT_CAP];
     swprintf(q, ACT_CAP, L"\"%ls\"", url);
+    if (s_browser) {
+        if (open_in_browser(s_browser, q)) return true;
+        s_browser_missing = true;
+    }
     if (g_cfg.browser[0] && shell_open(g_cfg.browser, q)) return true;
     return shell_open(url, NULL);
 }
@@ -853,7 +899,11 @@ static void resolve_upload(const wchar_t *rest, CmdResult *r)
 /* ------------------------------------------------------------ fixed phrases */
 static WList CLOSE_W = { L"cancel", L"never mind", L"nevermind", L"close", L"close it", L"exit", L"stop", L"quit",
     L"bye", L"goodbye", L"good bye", L"nothing", L"no", L"nope", L"dismiss", L"forget it", L"that's all",
-    L"thats all", L"hide", L"go away", L"cancel that", L"close jarvis", NULL };
+    L"thats all", L"hide", L"go away", L"cancel that", L"close jarvis", L"quit jarvis", L"exit jarvis", NULL };
+/* the subset that means "I'm done with JARVIS" (the others only cancel) */
+static WList QUIT_W = { L"close", L"close it", L"exit", L"quit", L"cancel", L"cancel that", L"bye", L"goodbye",
+    L"good bye", L"that's all", L"thats all", L"go away", L"dismiss", L"close jarvis", L"quit jarvis",
+    L"exit jarvis", NULL };
 static WList HELP_W = { L"help", L"help me", L"what can you do", L"what can i say", L"what do you do", L"commands",
     L"show commands", L"list commands", L"what are the commands", L"options", NULL };
 static WList TIME_W = { L"time", L"what time is it", L"what's the time", L"whats the time", L"what is the time",
@@ -922,7 +972,13 @@ static void show_help(CmdResult *r)
 static bool run_fixed(const wchar_t *s, CmdResult *r)
 {
     wchar_t buf[128];
-    if (in_list(s, CLOSE_W)) { record(L"CLOSE"); reply(r, L"Okay."); done(r); return true; }
+    if (in_list(s, CLOSE_W)) {
+        record(L"CLOSE");
+        reply(r, L"Okay.");
+        done(r);
+        r->quit = in_list(s, QUIT_W);   /* "close" / "exit": end JARVIS even with stay_open */
+        return true;
+    }
     if (in_list(s, HELP_W)) { show_help(r); return true; }
     if (in_list(s, TIME_W)) {
         if (!GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, NULL, NULL, buf, 128)) buf[0] = 0;
@@ -1037,8 +1093,7 @@ static WList GOTO_V = { L"go to", L"goto", L"take me to", L"navigate to", L"swit
 static WList UPLOAD_V = { L"upload", L"attach", L"select", L"pick", L"choose", NULL };
 static WList OPEN_V = { L"open up", L"open", L"launch", L"start", L"run", L"show me", L"show", L"play",
     L"bring up", L"pull up", L"load", L"view", L"display", NULL };
-static WList BROWSER_SUF = { L"in chrome", L"in google chrome", L"in the browser", L"in browser",
-    L"on chrome", L"in my browser", NULL };
+static WList BROWSER_SUF = { L"in the browser", L"in browser", L"in my browser", NULL };
 
 static bool match_reveal(const wchar_t *s, wchar_t *out, size_t cap)
 {
@@ -1052,20 +1107,43 @@ static bool match_reveal(const wchar_t *s, wchar_t *out, size_t cap)
     return false;
 }
 
-/* "open X in chrome": X is a site name or a web address */
-static bool try_browser(const wchar_t *s, CmdResult *r)
+/* Cuts " in|on|with|using <browser> [browser]" off t; returns the browser. */
+static const Browser *cut_browser(wchar_t *t)
 {
-    wchar_t t[256], name[256], url[ACT_CAP];
-    str_copy(t, 256, s);
-    bool hit = false;
-    for (const wchar_t *const *p = BROWSER_SUF; *p && !hit; p++) hit = cut_suffix(t, *p);
-    if (!hit) return false;
+    static WList PREP = { L"in", L"on", L"with", L"using", NULL };
+    for (size_t i = 0; i < sizeof BROWSERS / sizeof BROWSERS[0]; i++)
+        for (const wchar_t *const *p = PREP; *p; p++) {
+            wchar_t suf[64];
+            swprintf(suf, 64, L"%ls %ls browser", *p, BROWSERS[i].name);
+            if (cut_suffix(t, suf)) return &BROWSERS[i];
+            swprintf(suf, 64, L"%ls %ls", *p, BROWSERS[i].name);
+            if (cut_suffix(t, suf)) return &BROWSERS[i];
+        }
+    return NULL;
+}
+
+/* "Chrome" for browser=chrome.exe (or a full path to it), for replies */
+static const wchar_t *configured_browser_name(void)
+{
+    const wchar_t *exe = path_name(g_cfg.browser);
+    for (size_t i = 0; i < sizeof BROWSERS / sizeof BROWSERS[0]; i++)
+        if (!_wcsicmp(exe, BROWSERS[i].exe)) return BROWSERS[i].disp;
+    return NULL;
+}
+
+/* X is a site name, a web address or a web search ("google black holes") */
+static bool open_web_target(wchar_t *t, CmdResult *r)
+{
+    wchar_t full[256], name[256], url[ACT_CAP], q[256];
+    str_copy(full, 256, t);
     cut_prefixes(t, OPEN_V);
     cut_prefixes(t, GOTO_V);
     strip_articles(t, name, 256);
     if (!name[0]) return false;
+    int engine;
     const wchar_t *v = site_url(name);
     if (v) str_copy(url, ACT_CAP, v);
+    else if (match_web(full, &engine, q, 256)) { web_search(engine, q, r); return true; }
     else if (wcschr(name, L'.')) make_url(name, url, ACT_CAP);
     else if (!wcschr(name, L' ')) swprintf(url, ACT_CAP, L"https://www.%ls.com", name);
     else { web_search(W_GOOGLE, name, r); return true; }
@@ -1074,6 +1152,36 @@ static bool try_browser(const wchar_t *s, CmdResult *r)
     act_url(url);
     reply(r, L"Opening %ls.", disp);
     done(r);
+    return true;
+}
+
+/* "open X in brave", "youtube lofi in edge", "open X in the browser" */
+static bool try_browser(const wchar_t *s, CmdResult *r)
+{
+    wchar_t t[256];
+    str_copy(t, 256, s);
+    const Browser *b = cut_browser(t);
+    bool hit = b != NULL;
+    for (const wchar_t *const *p = BROWSER_SUF; *p && !hit; p++) hit = cut_suffix(t, *p);
+    if (!hit) return false;
+    s_browser = b;
+    s_browser_missing = false;
+    bool ok = open_web_target(t, r);
+    s_browser = NULL;
+    if (!ok || !b) return ok;
+    if (s_browser_missing) {
+        const wchar_t *cfg = configured_browser_name();
+        if (cfg && _wcsicmp(path_name(g_cfg.browser), b->exe))
+            reply(r, L"%ls isn't installed, opening in %ls.", b->disp, cfg);
+        else
+            reply(r, L"%ls isn't installed, opening in your default browser.", b->disp);
+    } else {
+        size_t n = wcslen(r->reply);
+        if (n && r->reply[n - 1] == L'.') r->reply[--n] = 0;
+        wchar_t tail[64];
+        swprintf(tail, 64, L" in %ls.", b->disp);
+        str_cat(r->reply, 300, tail);
+    }
     return true;
 }
 
