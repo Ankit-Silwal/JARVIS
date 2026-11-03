@@ -513,7 +513,7 @@ static void paint_all(HDC dc, int w, int h)
         for (int i = 0; i < g.nrows; i++) paint_row(dc, i);
 
         RECT hr = { S(L_EDIT_X - 26), h - S(L_HINT_H), S(L_W - L_PAD_R), h - S(4) };
-        text_at(dc, g.fSmall, T.dim, L"\x21B5 open     \x21E7\x21B5 show in folder     esc close",
+        text_at(dc, g.fSmall, T.dim, L"enter  open        shift+enter  show in folder        esc  close",
                 &hr, DT_LEFT | DT_SINGLELINE | DT_VCENTER);
         if (search_busy())
             text_at(dc, g.fSmall, T.dim, L"indexing\x2026", &hr, DT_RIGHT | DT_SINGLELINE | DT_VCENTER);
@@ -889,6 +889,7 @@ static void run_text(const wchar_t *text)
         return;
     }
 
+    if (g.bg) str_copy(g.hyp, 320, buf);   /* shown in the box if the bar appears */
     g.busy = true;
     memset(&g_res, 0, sizeof g_res);
     cmd_run(buf, &g_res);

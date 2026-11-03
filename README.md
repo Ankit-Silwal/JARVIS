@@ -43,7 +43,7 @@ Press the key once → JARVIS opens and listens. Press it again → mic on/off.
 
 ## What you can say
 
-Talk after the reactor lights up. Short commands work best.
+Talk after the mic dot turns blue. Short commands work best.
 
 ### Files and folders
 
@@ -112,7 +112,7 @@ Names on the left are what you **say** (lowercase). Delete the file to get the d
 
 | Section | What it's for |
 |---|---|
-| `[general]` | `speak`, `listen_on_start`, `voice` (David / Zira), `voice_rate` (-10..10), `close_delay_ms`, `browser`, `index_max_age_min` |
+| `[general]` | `mode` (normal / background), `speak`, `listen_on_start`, `voice` (David / Zira), `voice_rate` (-10..10), `close_delay_ms`, `browser`, `index_max_age_min` |
 | `[search]` | `roots` = extra folders to index (separate with `;`), `skip` = folder names never scanned |
 | `[sites]` | spoken name = website |
 | `[apps]` | spoken name = program, `ms-settings:` link, etc. |
@@ -158,7 +158,7 @@ Desktop, Documents, Downloads, Pictures, Videos, Music and OneDrive are always i
 |---|---|
 | It doesn't hear me | Settings → Privacy & security → **Microphone** → turn on **"Let desktop apps access your microphone"**. Check the right mic is the default in Sound settings. |
 | No speech recognition at all | JARVIS needs the Windows recognizer "Microsoft Speech Recognizer 8.0 for Windows (English - US)". Settings → Time & language → Language & region / Speech: make sure **English (United States)** is installed with speech. |
-| It mishears me | Speak **after** the reactor lights up. Use short commands ("open downloads", not a full sentence). Quiet room helps. If available, run Control Panel → Speech Recognition → **Train your computer to better understand you** (not on every Windows build). You can always type instead. |
+| It mishears me | Speak **after** the mic dot turns blue. Use short commands ("open downloads", not a full sentence). Quiet room helps. If available, run Control Panel → Speech Recognition → **Train your computer to better understand you** (not on every Windows build). You can always type instead. |
 | File not found | Run `jarvis.exe --reindex`, or say "reindex". If the file is outside your normal folders, add its folder to `roots` in `[search]`. |
 | Wrong app / site opens | Add or fix the name in `[apps]` / `[sites]`. |
 
@@ -175,7 +175,9 @@ jarvis.exe --reindex
 `--dry-run` prints what the command **would** do (nothing is opened). `--search` prints matching files.
 Tip: use Command Prompt. In PowerShell add `| Out-String` at the end so it waits for the output.
 
-Other options: `jarvis.exe --type` (open without listening), `jarvis.exe "open downloads"` (run a command right away).
+Other options: `jarvis.exe --type` (open without listening), `jarvis.exe --background` (no window: just listen and talk; a small "Listening…" pill shows at the bottom and the bar appears only when you need to pick from a list), `jarvis.exe --normal` (always show the bar), `jarvis.exe "open downloads"` (run a command right away).
+
+While the bar is open, say or type **"hide"** / **"background mode"** (or press **Ctrl+H**) to keep going in the background; say **"show window"** to bring it back. Set `mode=background` in `jarvis.ini` to always start hidden.
 
 ---
 
@@ -185,7 +187,7 @@ Other options: `jarvis.exe --type` (open without listening), `jarvis.exe "open d
 |---|---|
 | `src/jarvis.h` | Shared declarations for all modules |
 | `src/main.c` | Entry point, command-line flags, single instance (second launch = toggle mic) |
-| `src/ui.c` | The overlay window: reactor, text box, results, keyboard |
+| `src/ui.c` | The search bar (mic dot, text box, results, keyboard) and the background-mode pill |
 | `src/commands.c` | Understands commands and does the actions |
 | `src/search.c` | File index + fuzzy search, Start Menu app search |
 | `src/voice.c` | Offline speech recognition and text-to-speech (SAPI) on its own thread |
