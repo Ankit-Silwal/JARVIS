@@ -67,6 +67,7 @@ typedef struct {
     bool  speak;
     bool  listen_on_start;
     bool  background;            /* mode=background: no window, just listen + talk */
+    bool  stay_open;             /* keep running after a command until the user closes JARVIS */
     int   voice_rate;            /* -10..10 */
     wchar_t voice_name[64];      /* substring of voice name, e.g. "David" */
     int   index_max_age_min;
@@ -160,7 +161,8 @@ typedef enum {
 typedef struct {
     wchar_t reply[300];       /* shown + spoken */
     bool    speak;            /* speak reply */
-    bool    close;            /* close overlay after replying */
+    bool    close;            /* close overlay after replying (ignored with stay_open) */
+    bool    quit;             /* the user asked to close JARVIS ("close", "exit", "bye"...) */
     bool    listen_again;     /* expect a follow-up (e.g. "number two") */
     int     nrows;
     Row     rows[MAX_HITS];
@@ -176,6 +178,8 @@ HWND cmd_dialog(void);
  *   "REVEAL <path>"      show file selected in Explorer
  *   "DIALOG <path>"      type path into the Upload/Open dialog
  *   "URL <url>"          open url in the configured browser
+ *   "URL <url> [<exe>]"  open url in a browser named in the command
+ *                        ("open youtube in brave" -> "URL https://www.youtube.com [brave.exe]")
  *   "APP <target>"       launch program / uri / .lnk (target as configured, args after a space allowed)
  *   "SYS <name>"         system action: lock, screenshot, volume_up, volume_down, mute, reindex
  *   "LIST <n>"           showed n rows for the user to pick from
