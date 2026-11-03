@@ -66,6 +66,7 @@ typedef struct {
     wchar_t **skip;   int nskip;    /* folder names to skip while indexing */
     bool  speak;
     bool  listen_on_start;
+    bool  background;            /* mode=background: no window, just listen + talk */
     int   voice_rate;            /* -10..10 */
     wchar_t voice_name[64];      /* substring of voice name, e.g. "David" */
     int   index_max_age_min;
@@ -192,8 +193,10 @@ typedef void (*PhraseFn)(const wchar_t *verb, const wchar_t *name, void *ctx);
 void cmd_grammar(PhraseFn fn, void *ctx);
 
 /* --------------------------------------------------------------------- ui.c */
-/* initial_cmd: optional command to run right away (from the command line) */
-bool ui_create(HINSTANCE inst, HWND dialog, bool listen, const wchar_t *initial_cmd);
+/* initial_cmd: optional command to run right away (from the command line).
+ * background: start hidden (no window; listen + speak, show a small
+ * non-activating "listening" pill; the bar appears only when needed). */
+bool ui_create(HINSTANCE inst, HWND dialog, bool listen, const wchar_t *initial_cmd, bool background);
 void ui_toggle_listen(void);
 int  ui_loop(void);
 

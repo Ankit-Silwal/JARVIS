@@ -256,6 +256,11 @@ void config_load(void)
     /* general */
     g_cfg.speak = read_int(L"general", L"speak", 1) != 0;
     g_cfg.listen_on_start = read_int(L"general", L"listen_on_start", 1) != 0;
+    {
+        wchar_t mode[32];
+        read_str(L"general", L"mode", L"normal", mode, 32);
+        g_cfg.background = _wcsicmp(mode, L"background") == 0 || _wcsicmp(mode, L"hidden") == 0;
+    }
     g_cfg.voice_rate = read_int(L"general", L"voice_rate", 1);
     g_cfg.close_delay_ms = read_int(L"general", L"close_delay_ms", 1100);
     g_cfg.index_max_age_min = read_int(L"general", L"index_max_age_min", 30);
