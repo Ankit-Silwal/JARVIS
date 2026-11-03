@@ -36,6 +36,12 @@ static DWORD g_deadline;
 
 static void post(VoiceEvent e, LPARAM lp) { PostMessageW(g_notify, WM_APP_VOICE, (WPARAM)e, lp); }
 
+/* VE_HYPOTHESIS / VE_RESULT carry a heap string the receiver frees */
+static void post_text(VoiceEvent e, wchar_t *t)
+{
+    if (!PostMessageW(g_notify, WM_APP_VOICE, (WPARAM)e, (LPARAM)t)) free(t);
+}
+
 static void free_event(SPEVENT *ev)
 {
     switch (ev->elParamType) {
@@ -198,14 +204,14 @@ static void pump_sr(void)
             if (g_listening) {
                 g_deadline = GetTickCount() + LISTEN_EXTEND_MS;
                 wchar_t *t = result_text(&ev);
-                if (t) post(VE_HYPOTHESIS, (LPARAM)t);
+                if (t) post_text(VE_HYPOTHESIS, t);
             }
             break;
         case SPEI_RECOGNITION:
             if (g_listening) {
                 wchar_t *t = result_text(&ev);
                 set_listen(false);
-                if (t) post(VE_RESULT, (LPARAM)t); else post(VE_NOMATCH, 0);
+                if (t) post_text(VE_RESULT, t); else post(VE_NOMATCH, 0);
             }
             break;
         case SPEI_FALSE_RECOGNITION:
@@ -271,18 +277,20 @@ static DWORD WINAPI voice_thread(LPVOID unused)
     if (g_tts) { i_tts = nh; hs[nh++] = ISpVoice_GetNotifyEventHandle(g_tts); }
 
     for (;;) {
+        /* checked every pass: with the mic on, audio-level events wake us
+         * constantly, so WAIT_TIMEOUT alone may never be seen */
+        if (g_listening && (int)(GetTickCount() - g_deadline) >= 0) { set_listen(false); post(VE_TIMEOUT, 0); }
         DWORD timeout = INFINITE;
         if (g_listening) {
             DWORD now = GetTickCount();
             timeout = (int)(g_deadline - now) > 0 ? g_deadline - now : 0;
         }
-        DWORD w = MsgWaitForMultipleObjects(nh, hs, FALSE, timeout, QS_ALLINPUT);
-        if (w == WAIT_TIMEOUT) {
-            if (g_listening && (int)(GetTickCount() - g_deadline) >= 0) { set_listen(false); post(VE_TIMEOUT, 0); }
-            continue;
-        }
-        if (i_sr >= 0 && w == WAIT_OBJECT_0 + (DWORD)i_sr) { pump_sr(); continue; }
-        if (i_tts >= 0 && w == WAIT_OBJECT_0 + (DWORD)i_tts) { pump_tts(); continue; }
+        /* MWMO_INPUTAVAILABLE: also wake for messages already in the queue */
+        DWORD w = MsgWaitForMultipleObjectsEx(nh, hs, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
+        if (w == WAIT_TIMEOUT) continue;
+        /* no `continue`: a busy SR handle must not starve the message queue */
+        if (i_sr >= 0 && w == WAIT_OBJECT_0 + (DWORD)i_sr) pump_sr();
+        if (i_tts >= 0 && w == WAIT_OBJECT_0 + (DWORD)i_tts) pump_tts();
 
         while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
             switch (m.message) {

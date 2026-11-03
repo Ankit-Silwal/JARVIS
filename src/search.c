@@ -257,13 +257,16 @@ static Index *index_load(void)
         char *nl = strchr(p, '\n');
         if (!nl) break;
         *nl = 0;
+        if (nl > p && nl[-1] == '\r') nl[-1] = 0;   /* file re-saved with CRLF */
         /* kind \t depth \t time \t path */
         char kind = p[0];
         char *t1 = strchr(p, '\t');
         char *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
         char *t3 = t2 ? strchr(t2 + 1, '\t') : NULL;
-        if (t3) {
+        if (t3 && t1 == p + 1 && (kind == 'D' || kind == 'F')) {
             int depth = atoi(t1 + 1);
+            if (depth < 0) depth = 0;
+            if (depth > MAX_DEPTH) depth = MAX_DEPTH;
             unsigned long long t = strtoull(t2 + 1, NULL, 16);
             int n = MultiByteToWideChar(CP_UTF8, 0, t3 + 1, -1, wpath, MAX_PATH);
             if (n > 1) {
@@ -370,7 +373,12 @@ static bool find_token(const wchar_t *hay, const wchar_t *orig, const wchar_t *t
     const wchar_t *p = hay;
     bool found = false;
     *at_word = false;
+    /* a number must match a whole number: "2" is not in "chapter23" or a hash */
+    bool num = iswdigit(tok[0]) != 0;
+    for (const wchar_t *c = tok; num && *c; c++) num = iswdigit(*c) != 0;
+    size_t tl = wcslen(tok);
     while ((p = wcsstr(p, tok)) != NULL) {
+        if (num && ((p > hay && iswdigit(p[-1])) || iswdigit(p[tl]))) { p++; continue; }
         found = true;
         if (word_start(orig, (size_t)(p - hay))) { *at_word = true; return true; }
         p++;
