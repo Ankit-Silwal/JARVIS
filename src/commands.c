@@ -1088,6 +1088,7 @@ static int resolve_ref(DocOp op, ExtClass hint, wchar_t (*out)[MAX_PATH], int ma
             str_copy(out[n++], MAX_PATH, s_sel[i]);
     if (!n && s_last[0] && path_exists(s_last) && op_accepts(op, s_last))
         str_copy(out[n++], MAX_PATH, s_last);
+    if (!n && hint) return resolve_ref(op, EXT_ANY, out, max);   /* "this doc" on a .txt */
     return n;
 }
 
@@ -1694,7 +1695,10 @@ static void plan_run(Plan *p, CmdResult *r)
     case DOC_TO_PDF:  reply(r, L"Converting %ls to PDF\x2026", n0); break;
     case DOC_TO_DOCX: reply(r, L"Converting %ls to Word\x2026", n0); break;
     case DOC_SPLIT:   reply(r, L"Splitting %ls after page %d\x2026", n0, t.a); break;
-    case DOC_EXTRACT: reply(r, L"Taking pages %d to %d from %ls\x2026", t.a, t.b, n0); break;
+    case DOC_EXTRACT:
+        if (t.a == t.b) reply(r, L"Taking page %d from %ls\x2026", t.a, n0);
+        else reply(r, L"Taking pages %d to %d from %ls\x2026", t.a, t.b, n0);
+        break;
     case DOC_MERGE:   reply(r, L"Merging %d PDFs\x2026", t.nsrc); break;
     case DOC_PAGES:   reply(r, L"Counting the pages of %ls\x2026", n0); break;
     default: break;
