@@ -139,7 +139,7 @@ static WList LEAD_FILLERS = {
     L"can you", L"could you", L"would you", L"will you", L"i want to", L"i wanna", L"i need to",
     L"i'd like to", L"i would like to", L"let's", L"lets", L"hey", L"hi", L"hello", L"ok", L"okay",
     L"please", L"jarvis", L"um", L"uh", L"so", L"just", L"yo", NULL };
-static WList TRAIL_FILLERS = { L"please", L"for me", L"right now", L"now", L"jarvis", L"thanks",
+static WList TRAIL_FILLERS = { L"please", L"for me", L"right now", L"now", L"thanks",
                                L"thank you", NULL };
 
 /* Lowercase, drop punctuation (keeping it inside tokens like youtube.com, c:\x,
@@ -182,6 +182,17 @@ static void normalize(const wchar_t *in, wchar_t *out, size_t cap)
         again = cut_prefixes(out, LEAD_FILLERS);
         for (const wchar_t *const *p = TRAIL_FILLERS; *p; p++)
             if (cut_suffix(out, *p)) again = true;
+        /* "open downloads, jarvis" - but keep it in "search github for jarvis" */
+        static WList KEEP_BEFORE = { L"for", L"about", L"called", L"named", L"search", L"find", L"google",
+                                     L"youtube", L"github", L"wikipedia", L"open", NULL };
+        size_t L = wcslen(out);
+        if (L > 7 && str_ends(out, L" jarvis")) {
+            wchar_t prev[64] = L"";
+            const wchar_t *end = out + L - 7, *b = end;
+            while (b > out && b[-1] != L' ') b--;
+            if (end - b < 64) { memcpy(prev, b, (size_t)(end - b) * sizeof(wchar_t)); prev[end - b] = 0; }
+            if (!in_list(prev, KEEP_BEFORE)) { out[L - 7] = 0; again = true; }
+        }
     }
     str_trim(out);
 }
@@ -389,7 +400,7 @@ static const wchar_t *filter_folder(const wchar_t *n)
     return f && !is_shell_path(f) ? f : NULL;
 }
 
-/* "c drive", "see drive", "drive d", "c colon", "c:" -> "C:\" */
+/* "c drive", "see drive", "drive d", "c colon", "c:" -> "C:\" (may not exist) */
 static bool parse_drive(const wchar_t *s, wchar_t *out)
 {
     static const struct { const wchar_t *w; wchar_t l; } SPOKEN[] = {
@@ -412,7 +423,7 @@ static bool parse_drive(const wchar_t *s, wchar_t *out)
         if (str_eq(letter, SPOKEN[i].w)) c = SPOKEN[i].l;
     if (!c) return false;
     swprintf(out, 8, L"%lc:\\", (wint_t)towupper(c));
-    return path_is_dir(out);
+    return true;
 }
 
 /* ------------------------------------------------------------ file queries */
@@ -646,7 +657,7 @@ static bool match_web(const wchar_t *s, int *engine, wchar_t *query, size_t cap)
         str_copy(query, cap, p);
         if (WEB[i].suf[0] && !cut_suffix(query, WEB[i].suf)) continue;
         str_trim(query);
-        if (!query[0]) continue;
+        if (!query[0] || str_eq(query, L"for")) continue;
         *engine = WEB[i].engine;
         return true;
     }
@@ -711,6 +722,11 @@ static bool try_drive_or_url(const wchar_t *name, CmdResult *r)
 {
     wchar_t drv[8], url[ACT_CAP];
     if (parse_drive(name, drv)) {
+        if (!path_is_dir(drv)) {
+            reply(r, L"There's no drive %lc on this PC.", drv[0]);
+            record(L"SAY");
+            return true;
+        }
         if (dialog_active() && act_dialog(drv)) reply(r, L"Going to drive %lc.", drv[0]);
         else { act_open(drv); reply(r, L"Opening drive %lc.", drv[0]); }
         done(r);
