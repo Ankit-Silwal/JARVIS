@@ -2108,6 +2108,19 @@ void cmd_run(const wchar_t *text, CmdResult *r)
             return;
         }
     }
+    /* recognizers often hear "open" as "one" / "won" / "opened" ("one downloads") */
+    if (!s_nrows) {
+        static WList OPEN_MISS = { L"one", L"won", L"opened", L"opening", L"oben", L"up in", NULL };
+        for (const wchar_t *const *v = OPEN_MISS; *v; v++) {
+            const wchar_t *rest = str_after_word(s, *v);
+            if (rest && *rest) {
+                wchar_t t[S_CAP];
+                swprintf(t, S_CAP, L"open %ls", rest);
+                str_copy(s, S_CAP, t);
+                break;
+            }
+        }
+    }
     if (run_fixed(s, r)) return;
 
     /* an exact configured name wins over everything ("google drive", "youtube") */

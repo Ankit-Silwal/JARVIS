@@ -1,13 +1,23 @@
-/* Voice: offline speech recognition + text-to-speech using the Microsoft
- * Speech API (SAPI 5) that ships with Windows. No downloads, no internet.
+/* Voice: speech recognition + text-to-speech. No internet.
  *
- * Everything SAPI-related lives on one worker thread so the overlay stays
- * smooth while the recognizer starts up (~1 s). The UI talks to it with
- * PostThreadMessage; it answers with WM_APP_VOICE messages. */
+ * Recognition, best first:
+ *   - Whisper (whisper.cpp + a ggml model in %LOCALAPPDATA%\JARVIS\whisper,
+ *     see whisper.c): JARVIS records the microphone with waveIn, a small
+ *     voice-activity detector cuts out what was said, and whisper-cli.exe
+ *     transcribes it in a hidden process (~1 s). Far more accurate than the
+ *     old Windows recognizer, especially with accents.
+ *   - The Microsoft Speech API (SAPI 5) recognizer that ships with Windows,
+ *     when Whisper isn't installed (or [voice] engine=windows).
+ * Text-to-speech is always SAPI (the David / Zira voices).
+ *
+ * Everything lives on one worker thread so the overlay stays smooth while
+ * the recognizer starts up. The UI talks to it with PostThreadMessage; it
+ * answers with WM_APP_VOICE messages. */
 #define COBJMACROS
 #include "jarvis.h"
 #include <initguid.h>
 #include <sapi.h>
+#include <mmsystem.h>
 #include <stdlib.h>
 #include <wctype.h>
 
@@ -17,7 +27,9 @@
 #define VM_HUSH   (WM_APP + 53)   /* stop speaking now; wParam: listen afterwards */
 
 #define LISTEN_MS        9000   /* give up when nothing was said for this long */
-#define LISTEN_EXTEND_MS 4000   /* extra time once speech started */
+#define LISTEN_EXTEND_MS 4000   /* extra time once speech started (SAPI) */
+#define UTTERANCE_MS    16000   /* Whisper: an utterance may take this long at most */
+#define WHISPER_WAIT_MS 20000   /* a transcription that takes longer is broken */
 
 /* SPFEI() in the SDK header uses an MSVC-only literal; same thing, portable: */
 #define FEI(e) ((1ULL << (e)) | (1ULL << SPEI_RESERVED1) | (1ULL << SPEI_RESERVED2))
@@ -26,6 +38,7 @@ static HWND   g_notify;
 static HANDLE g_thread, g_qready;
 static DWORD  g_tid;
 static volatile LONG g_ok;   /* recognizer available */
+static wchar_t g_engine_name[80];
 
 /* worker-thread state */
 static ISpRecognizer  *g_rec;
@@ -34,6 +47,22 @@ static ISpRecoGrammar *g_dict, *g_cmds;
 static ISpVoice       *g_tts;
 static bool  g_listening, g_listen_after_speech, g_speaking;
 static DWORD g_deadline;
+
+/* Whisper path */
+#define NBUF 8
+#define PCM_CAP (16000 * UTTERANCE_MS / 1000)
+static bool    g_use_whisper;
+static wchar_t g_wexe[MAX_PATH], g_wmodel[MAX_PATH], g_wprompt[1024];
+static HWAVEIN g_wave;
+static HANDLE  g_wave_ev;
+static WAVEHDR g_hdr[NBUF];
+static short   g_buf[NBUF][VAD_FRAME];
+static short   g_pcm[PCM_CAP];
+static int     g_npcm;
+static Vad     g_vad;
+static HANDLE  g_wproc;                 /* whisper-cli running on the last utterance */
+static DWORD   g_wstart;
+static bool    g_listen_after_whisper;  /* listen was asked for while transcribing */
 
 static void post(VoiceEvent e, LPARAM lp) { PostMessageW(g_notify, WM_APP_VOICE, (WPARAM)e, lp); }
 
@@ -57,14 +86,128 @@ static void free_event(SPEVENT *ev)
     }
 }
 
+/* ------------------------------------------------------------ microphone */
+static bool mic_open(void)
+{
+    if (g_wave) return true;
+    if (!g_wave_ev) g_wave_ev = CreateEventW(NULL, FALSE, FALSE, NULL);
+    WAVEFORMATEX wf = { WAVE_FORMAT_PCM, 1, 16000, 32000, 2, 16, 0 };
+    MMRESULT r = waveInOpen(&g_wave, WAVE_MAPPER, &wf, (DWORD_PTR)g_wave_ev, 0, CALLBACK_EVENT);
+    if (r != MMSYSERR_NOERROR) {
+        log_line(L"mic: waveInOpen failed (%u)", r);
+        g_wave = NULL;
+        return false;
+    }
+    for (int i = 0; i < NBUF; i++) {
+        memset(&g_hdr[i], 0, sizeof(WAVEHDR));
+        g_hdr[i].lpData = (LPSTR)g_buf[i];
+        g_hdr[i].dwBufferLength = VAD_FRAME * sizeof(short);
+        waveInPrepareHeader(g_wave, &g_hdr[i], sizeof(WAVEHDR));
+        waveInAddBuffer(g_wave, &g_hdr[i], sizeof(WAVEHDR));
+    }
+    waveInStart(g_wave);
+    return true;
+}
+
+static void mic_close(void)
+{
+    if (!g_wave) return;
+    waveInStop(g_wave);
+    waveInReset(g_wave);
+    for (int i = 0; i < NBUF; i++) waveInUnprepareHeader(g_wave, &g_hdr[i], sizeof(WAVEHDR));
+    waveInClose(g_wave);
+    g_wave = NULL;
+}
+
 static void set_listen(bool on)
 {
-    if (!g_rec) return;
     if (on == g_listening) return;
-    ISpRecognizer_SetRecoState(g_rec, on ? SPRST_ACTIVE : SPRST_INACTIVE);
+    if (g_use_whisper) {
+        if (on) {
+            if (g_wproc) { g_listen_after_whisper = true; return; }   /* after the result */
+            g_npcm = 0;
+            vad_reset(&g_vad);
+            if (!mic_open()) { post(VE_LISTENING, 0); return; }
+        } else {
+            mic_close();
+        }
+    } else {
+        if (!g_rec) return;
+        ISpRecognizer_SetRecoState(g_rec, on ? SPRST_ACTIVE : SPRST_INACTIVE);
+    }
     g_listening = on;
     if (on) g_deadline = GetTickCount() + LISTEN_MS;
     post(VE_LISTENING, on);
+}
+
+/* the utterance is in g_pcm[from..to): stop the mic, start whisper-cli */
+static void transcribe(int from, int to)
+{
+    if (from < 0) from = 0;
+    if (to > g_npcm) to = g_npcm;
+    set_listen(false);
+    if (to - from < VAD_FRAME * 4) { post(VE_NOMATCH, 0); return; }
+    g_wproc = whisper_start(g_pcm + from, to - from, g_wexe, g_wmodel, g_wprompt);
+    if (!g_wproc) { post(VE_NOMATCH, 0); return; }
+    g_wstart = GetTickCount();
+    post(VE_THINKING, 1);
+}
+
+static void pump_mic(void)
+{
+    if (!g_wave) return;
+    for (int i = 0; i < NBUF; i++) {
+        WAVEHDR *h = &g_hdr[i];
+        if (!(h->dwFlags & WHDR_DONE)) continue;
+        if (g_listening && h->dwBytesRecorded == VAD_FRAME * sizeof(short)) {
+            const short *f = (const short *)h->lpData;
+            bool full = g_npcm + VAD_FRAME > PCM_CAP;
+            if (!full) { memcpy(g_pcm + g_npcm, f, VAD_FRAME * sizeof(short)); g_npcm += VAD_FRAME; }
+            int ev = vad_frame(&g_vad, f);
+            post(VE_LEVEL, g_vad.level);
+            if (ev == VAD_START) {
+                g_deadline = GetTickCount() + UTTERANCE_MS;
+                log_line(L"mic: speech (room noise %.0f)", g_vad.floor);
+            } else if (ev == VAD_END) {
+                log_line(L"mic: utterance %d ms", (g_vad.end - g_vad.start) * 30);
+                transcribe(g_vad.start * VAD_FRAME, g_vad.end * VAD_FRAME);
+                return;
+            } else if (ev == VAD_DISCARD) {
+                log_line(L"mic: short noise ignored");
+            } else if (full && g_vad.speech) {
+                log_line(L"mic: utterance cut at %d s", UTTERANCE_MS / 1000);
+                transcribe(g_vad.start * VAD_FRAME, g_npcm);
+                return;
+            }
+        }
+        if (!g_wave) return;          /* closed meanwhile */
+        waveInAddBuffer(g_wave, h, sizeof(WAVEHDR));
+    }
+}
+
+static void finish_transcribe(void)
+{
+    wchar_t text[LINE_MAX_CH];
+    bool ok = whisper_finish(g_wproc, text, LINE_MAX_CH);
+    g_wproc = NULL;
+    post(VE_THINKING, 0);
+    if (ok) {
+        log_line(L"whisper: \"%ls\" (%lu ms)", text, GetTickCount() - g_wstart);
+        post_text(VE_RESULT, wcs_dup(text));
+    } else {
+        log_line(L"whisper: nothing usable (\"%ls\", %lu ms)", text, GetTickCount() - g_wstart);
+        post(VE_NOMATCH, 0);
+    }
+    if (g_listen_after_whisper) { g_listen_after_whisper = false; set_listen(true); }
+}
+
+static void kill_transcribe(void)
+{
+    if (!g_wproc) return;
+    TerminateProcess(g_wproc, 1);
+    CloseHandle(g_wproc);
+    g_wproc = NULL;
+    post(VE_THINKING, 0);
 }
 
 /* ---------------------------------------------------- command grammar */
@@ -131,6 +274,30 @@ fail:
     if (g_rec) { ISpRecognizer_Release(g_rec); g_rec = NULL; }
     log_line(L"voice: speech recognition unavailable");
     return false;
+}
+
+/* Whisper when installed (and not switched off): checks the mic opens too */
+static bool init_whisper(void)
+{
+    if (g_cfg.engine == ENGINE_WINDOWS) return false;
+    if (!whisper_find(g_wexe, g_wmodel)) {
+        wchar_t dir[MAX_PATH];
+        whisper_dir(dir);
+        log_line(L"voice: Whisper not installed in %ls (tools\\get_whisper.ps1)%ls", dir,
+                 g_cfg.engine == ENGINE_WHISPER ? L", using the Windows recognizer" : L"");
+        return false;
+    }
+    if (!mic_open()) return false;
+    mic_close();
+    whisper_prompt(g_wprompt, 1024);
+    wchar_t m[64];
+    str_copy(m, 64, path_name(g_wmodel));
+    if (str_starts(m, L"ggml-")) memmove(m, m + 5, (wcslen(m + 5) + 1) * sizeof(wchar_t));
+    wchar_t *dot = wcsrchr(m, L'.');
+    if (dot && !_wcsicmp(dot, L".bin")) *dot = 0;
+    swprintf(g_engine_name, 80, L"Whisper %ls", m);
+    log_line(L"voice: %ls (%ls)", g_engine_name, g_wmodel);
+    return true;
 }
 
 static void pick_voice(void)
@@ -281,36 +448,58 @@ static DWORD WINAPI voice_thread(LPVOID unused)
 
     CoInitializeEx(NULL, COINIT_APARTMENTTHREADED);
     init_tts();
-    bool sr = init_sr();
+    bool sr;
+    if (init_whisper()) {
+        g_use_whisper = true;
+        sr = true;
+    } else {
+        sr = init_sr();
+        str_copy(g_engine_name, 80, L"Windows");
+    }
     InterlockedExchange(&g_ok, sr);
     post(VE_READY, sr);
 
-    HANDLE hs[2];
-    int nh = 0, i_sr = -1, i_tts = -1;
-    if (g_ctx) { i_sr = nh; hs[nh++] = ISpRecoContext_GetNotifyEventHandle(g_ctx); }
-    if (g_tts) { i_tts = nh; hs[nh++] = ISpVoice_GetNotifyEventHandle(g_tts); }
-
     for (;;) {
-        /* checked every pass: with the mic on, audio-level events wake us
+        /* checked every pass: with the mic on, level events wake us
          * constantly, so WAIT_TIMEOUT alone may never be seen */
-        if (g_listening && (int)(GetTickCount() - g_deadline) >= 0) { set_listen(false); post(VE_TIMEOUT, 0); }
+        if (g_listening && (int)(GetTickCount() - g_deadline) >= 0) {
+            if (g_use_whisper) log_line(L"mic: nothing heard%ls", g_vad.speech ? L" to the end" : L"");
+            set_listen(false);
+            post(VE_TIMEOUT, 0);
+        }
+        if (g_wproc && GetTickCount() - g_wstart > WHISPER_WAIT_MS) {
+            log_line(L"whisper: timed out");
+            kill_transcribe();
+            post(VE_NOMATCH, 0);
+        }
         DWORD timeout = INFINITE;
         if (g_listening) {
             DWORD now = GetTickCount();
             timeout = (int)(g_deadline - now) > 0 ? g_deadline - now : 0;
+        } else if (g_wproc) {
+            timeout = 500;
         }
+        HANDLE hs[4];
+        int nh = 0, i_sr = -1, i_tts = -1, i_mic = -1, i_w = -1;
+        if (g_ctx)  { i_sr = nh;  hs[nh++] = ISpRecoContext_GetNotifyEventHandle(g_ctx); }
+        if (g_tts)  { i_tts = nh; hs[nh++] = ISpVoice_GetNotifyEventHandle(g_tts); }
+        if (g_wave) { i_mic = nh; hs[nh++] = g_wave_ev; }
+        if (g_wproc) { i_w = nh;  hs[nh++] = g_wproc; }
         /* MWMO_INPUTAVAILABLE: also wake for messages already in the queue */
         DWORD w = MsgWaitForMultipleObjectsEx(nh, hs, timeout, QS_ALLINPUT, MWMO_INPUTAVAILABLE);
         if (w == WAIT_TIMEOUT) continue;
-        /* no `continue`: a busy SR handle must not starve the message queue */
+        /* no `continue`: a busy handle must not starve the message queue */
         if (i_sr >= 0 && w == WAIT_OBJECT_0 + (DWORD)i_sr) pump_sr();
         if (i_tts >= 0 && w == WAIT_OBJECT_0 + (DWORD)i_tts) pump_tts();
+        if (i_mic >= 0 && w == WAIT_OBJECT_0 + (DWORD)i_mic) pump_mic();
+        if (i_w >= 0 && w == WAIT_OBJECT_0 + (DWORD)i_w) finish_transcribe();
 
         while (PeekMessageW(&m, NULL, 0, 0, PM_REMOVE)) {
             switch (m.message) {
             case VM_LISTEN:
                 if (m.wParam && g_speaking) g_listen_after_speech = true;
                 else set_listen(m.wParam != 0);
+                if (!m.wParam) g_listen_after_whisper = false;
                 break;
             case VM_SAY:
                 do_say((wchar_t *)m.lParam, m.wParam != 0);
@@ -320,6 +509,7 @@ static DWORD WINAPI voice_thread(LPVOID unused)
                 break;
             case VM_QUIT:
                 set_listen(false);
+                kill_transcribe();
                 if (g_tts && m.wParam) ISpVoice_WaitUntilDone(g_tts, (ULONG)m.wParam);
                 goto done;
             default:
@@ -329,6 +519,8 @@ static DWORD WINAPI voice_thread(LPVOID unused)
         }
     }
 done:
+    mic_close();
+    if (g_wave_ev) CloseHandle(g_wave_ev);
     if (g_cmds) ISpRecoGrammar_Release(g_cmds);
     if (g_dict) ISpRecoGrammar_Release(g_dict);
     if (g_ctx) ISpRecoContext_Release(g_ctx);
@@ -349,6 +541,8 @@ bool voice_start(HWND notify)
 }
 
 bool voice_available(void) { return g_ok != 0; }
+
+const wchar_t *voice_engine_name(void) { return g_engine_name; }
 
 void voice_listen(bool on)
 {

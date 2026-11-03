@@ -11,6 +11,7 @@
  *   jarvis.exe --reindex          rebuild the file index and exit
  *   jarvis.exe --search <words>   print matching files to the console (testing)
  *   jarvis.exe --dry-run <words>  print what a command WOULD do (testing)
+ *   jarvis.exe --transcribe <wav> run Whisper on a 16 kHz mono WAV, print the text
  *
  * Launching it again while it's open toggles the microphone instead of
  * opening a second window (that's what the Copilot key does). */
@@ -55,6 +56,25 @@ static int run_console(const wchar_t *mode, const wchar_t *text)
         console_out(line);
         return 0;
     }
+    if (str_eq(mode, L"--transcribe")) {
+        wchar_t exe[MAX_PATH], model[MAX_PATH], out[LINE_MAX_CH];
+        if (!whisper_find(exe, model)) {
+            whisper_dir(exe);
+            swprintf(line, 3000, L"Whisper is not installed in %ls (run tools\\get_whisper.ps1)\n", exe);
+            console_out(line);
+            return 2;
+        }
+        int n;
+        short *pcm = wav_read(text, &n);
+        if (!pcm) { console_out(L"can't read that WAV (needs 16 kHz, mono, 16-bit PCM)\n"); return 2; }
+        DWORD t0 = GetTickCount();
+        bool ok = whisper_run(pcm, n, out, LINE_MAX_CH, 60000);
+        free(pcm);
+        swprintf(line, 3000, L"model:  %ls\ntext:   %ls\ntime:   %lu ms\n", path_name(model), ok ? out : L"(nothing)",
+                 GetTickCount() - t0);
+        console_out(line);
+        return ok ? 0 : 1;
+    }
     search_init();
     search_wait(120000);
     if (str_eq(mode, L"--search")) {
@@ -88,7 +108,8 @@ int WINAPI wWinMain(HINSTANCE inst, HINSTANCE prev, PWSTR cmdline, int show)
     int argc = 0;
     wchar_t **argv = CommandLineToArgvW(GetCommandLineW(), &argc);
     const wchar_t *mode = argc > 1 ? argv[1] : L"";
-    bool console = str_eq(mode, L"--reindex") || str_eq(mode, L"--search") || str_eq(mode, L"--dry-run");
+    bool console = str_eq(mode, L"--reindex") || str_eq(mode, L"--search") || str_eq(mode, L"--dry-run") ||
+                   str_eq(mode, L"--transcribe");
 
     /* remember what had focus BEFORE we show anything (Upload dialog?) */
     HWND fg = GetForegroundWindow();
