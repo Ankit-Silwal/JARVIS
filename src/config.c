@@ -12,8 +12,11 @@ L"; JARVIS settings. Edit freely - changes apply the next time JARVIS opens.\r\n
 L"; Names on the left are what you SAY (lowercase). Delete this file to restore defaults.\r\n"
 L"\r\n"
 L"[general]\r\n"
-L"; speak replies out loud (1/0)\r\n"
+L"; speak replies out loud (1/0). Say \"mute jarvis\" / \"unmute jarvis\" or press Ctrl+M.\r\n"
 L"speak=1\r\n"
+L"; also say short confirmations like \"Opening Downloads.\" (1/0). 0 = \"talk less\":\r\n"
+L"; answers, questions and problems are still spoken, confirmations are only shown.\r\n"
+L"speak_confirm=1\r\n"
 L"; start listening as soon as JARVIS opens (1/0)\r\n"
 L"listen_on_start=1\r\n"
 L"; voice to use (part of the name: David, Zira, ...) and speed -10..10\r\n"
@@ -251,6 +254,14 @@ static void write_default_ini(void)
     free(text);
 }
 
+void config_save_int(const wchar_t *section, const wchar_t *key, int value)
+{
+    wchar_t v[16];
+    swprintf(v, 16, L"%d", value);
+    if (!g_cfg.ini_path[0] || !WritePrivateProfileStringW(section, key, v, g_cfg.ini_path))
+        log_line(L"config: couldn't save %ls=%ls", key, v);
+}
+
 void config_load(void)
 {
     /* paths */
@@ -265,6 +276,7 @@ void config_load(void)
 
     /* general */
     g_cfg.speak = read_int(L"general", L"speak", 1) != 0;
+    g_cfg.speak_confirm = read_int(L"general", L"speak_confirm", 1) != 0;
     g_cfg.listen_on_start = read_int(L"general", L"listen_on_start", 1) != 0;
     {
         wchar_t mode[32];

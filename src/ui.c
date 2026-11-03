@@ -61,11 +61,13 @@
 #define T_PREVIEW  2
 #define T_CLOSE    3
 #define T_CLOSECAP 4
+#define T_LINGER   5   /* background: keep an unspoken reply on the pill a moment */
 
 #define ANIM_MS        33
 #define PREVIEW_MS     120
 #define GRACE_MS       400
 #define CLOSE_CAP_MS   4000
+#define LINGER_MS      2600
 #define SS             3          /* dot supersampling factor */
 
 #define EDIT_ID        100
@@ -117,7 +119,7 @@ static struct {
     bool  user_sel, rows_preview;
     PickMode pick_mode;
 
-    bool  suppress_change, ctrl_space, ctrl_h, edit_from_cmd;
+    bool  suppress_change, ctrl_space, ctrl_h, ctrl_key, edit_from_cmd;
 
     bool  close_pending, close_min_done, close_spoken;
     bool  tracking;
@@ -125,6 +127,8 @@ static struct {
     bool  stay;                 /* stay_open: run until the user closes JARVIS */
     bool  from_voice;           /* the command being run was spoken */
     bool  close_hover;          /* mouse over the x button */
+    bool  mute_hover;           /* mouse over the speaker button */
+    bool  linger;               /* background: show the (unspoken) reply on the pill */
     bool  tray;                 /* tray icon added */
     UINT  msg_taskbar;          /* "TaskbarCreated": explorer restarted */
 } g;
@@ -222,10 +226,19 @@ static RECT close_rect(void)
     return rc;
 }
 
+/* the speaker button (JARVIS's voice on / off), left of the x */
+static RECT mute_rect(void)
+{
+    int sz = S(L_CLOSE_W), r = has_close_btn() ? close_rect().left - S(2) : S(L_W) - S(10);
+    int t = (S(L_INPUT_H) - sz) / 2;
+    RECT rc = { r - sz, t, r, t + sz };
+    return rc;
+}
+
 /* right edge of the edit / upload label */
 static int input_right(void)
 {
-    return has_close_btn() ? close_rect().left - S(8) : S(L_W - L_PAD_R);
+    return mute_rect().left - S(8);
 }
 
 static RECT status_rect(void)
@@ -541,6 +554,12 @@ static void paint_all(HDC dc, int w, int h)
         if (g.close_hover) fill_round(dc, &cr, S(6), T.sel);
         text_at(dc, g.fClose, g.close_hover ? T.text : T.dim, L"\xE711", &cr, DT_CENTER | DT_SINGLELINE | DT_VCENTER);
     }
+    {   /* speaker: Volume (E767) while JARVIS talks, Mute (E74F) when muted */
+        RECT mr = mute_rect();
+        if (g.mute_hover) fill_round(dc, &mr, S(6), T.sel);
+        text_at(dc, g.fClose, g.mute_hover ? T.text : T.dim, g_cfg.speak ? L"\xE767" : L"\xE74F", &mr,
+                DT_CENTER | DT_SINGLELINE | DT_VCENTER);
+    }
 
     if (g.status[0]) {
         RECT sr = status_rect();
@@ -687,7 +706,7 @@ static void pill_refresh(void)
         if (g.listening || g.listen_requested) {
             if (g.hyp[0]) txt = g.hyp;
             else { txt = L"Listening\x2026"; dim = true; }
-        } else if (g.status[0] && (g.speaking || g.close_pending)) {
+        } else if (g.status[0] && (g.speaking || g.close_pending || g.linger)) {
             txt = g.status;   /* the reply, until we exit */
         }
     }
@@ -926,6 +945,11 @@ static int mode_phrase(const wchar_t *text)
 
 static void apply_result(CmdResult *r)
 {
+    if (r->clear) {
+        set_edit_text(L"");
+        g.edit_from_cmd = false;
+        g.hyp[0] = 0;
+    }
     if (r->rows_replace) {
         set_rows(r->rows, r->nrows, false);
         g.pick_mode = r->pick_mode;
@@ -935,7 +959,15 @@ static void apply_result(CmdResult *r)
     if (g.bg && r->rows_replace && r->nrows > 0) go_normal();
 
     bool spoke = false;
-    bool speak = r->speak || (g.bg && r->reply[0]);   /* hidden: the voice is the only output */
+    /* hidden: the voice is the only output. Muted (speak=0), or "talk less" with
+     * a plain confirmation: the reply is only shown. */
+    bool speak = (r->speak || (g.bg && r->reply[0])) && g_cfg.speak && r->reply[0] &&
+                 !(r->ack && !g_cfg.speak_confirm);
+    if (!g_cfg.speak && g.speaking) { voice_hush(false); g.speaking = false; }
+    if (g.bg && !speak && r->reply[0]) {   /* show it on the pill for a moment instead */
+        g.linger = true;
+        SetTimer(g.hwnd, T_LINGER, LINGER_MS, NULL);
+    }
     /* stay_open: after a spoken command (or in the background) listen for the
      * next one once the reply has been said; typed commands don't auto-listen */
     bool listen = r->listen_again || (g.stay && !r->quit && (g.from_voice || g.bg));
@@ -958,6 +990,7 @@ static void apply_result(CmdResult *r)
          * (not while a document task runs: its result is still to be told) */
         schedule_close(spoke);
     } else if (g.close_pending) cancel_close();
+    InvalidateRect(g.hwnd, NULL, FALSE);   /* the speaker button may have changed */
     state_changed();
 }
 
@@ -991,6 +1024,29 @@ static void run_text(const wchar_t *text)
     apply_result(&g_res);
     SendMessageW(g.edit, EM_SETSEL, 0, -1);   /* typing replaces it */
     g.edit_from_cmd = true;
+}
+
+/* the speaker button / Ctrl+M */
+static void toggle_mute(void)
+{
+    if (g.busy || g.closing) return;
+    g.busy = true;
+    memset(&g_res, 0, sizeof g_res);
+    cmd_run(g_cfg.speak ? L"mute jarvis" : L"unmute jarvis", &g_res);
+    g.busy = false;
+    if (!g.closing) apply_result(&g_res);
+}
+
+/* Esc / the Copilot key / a click while JARVIS talks: cut it short.
+ * listen: start listening right away (otherwise only if that was planned) */
+static bool stop_talking(bool listen)
+{
+    if (!g.speaking) return false;
+    voice_hush(listen);
+    g.speaking = false;
+    if (listen) { cancel_close(); g.listen_requested = true; }
+    state_changed();
+    return true;
 }
 
 static void pick_row(int i, bool reveal)
@@ -1067,6 +1123,7 @@ void ui_toggle_listen(void)
         set_status(L"Voice unavailable \x2014 type a command", ST_HINT);
         return;
     }
+    if (stop_talking(true)) return;   /* talking: stop and listen to the user */
     if (g.listening || g.listen_requested) {
         voice_listen(false);
         g.listen_requested = false;
@@ -1085,7 +1142,9 @@ static LRESULT CALLBACK edit_proc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR i
         bool ctrl = GetKeyState(VK_CONTROL) < 0, shift = GetKeyState(VK_SHIFT) < 0;
         switch (w) {
         case VK_RETURN: on_enter(shift); return 0;
-        case VK_ESCAPE: begin_close(); return 0;
+        case VK_ESCAPE:   /* the first Esc stops JARVIS talking, the next one closes */
+            if (!stop_talking(false)) begin_close();
+            return 0;
         case VK_UP:     move_sel(-1); return 0;
         case VK_DOWN:   move_sel(1); return 0;
         case VK_F2:     ui_toggle_listen(); return 0;
@@ -1094,6 +1153,20 @@ static LRESULT CALLBACK edit_proc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR i
             break;
         case 'H':
             if (ctrl) { g.ctrl_h = true; go_background(); return 0; }
+            break;
+        case 'M':
+            if (ctrl) { g.ctrl_key = true; toggle_mute(); return 0; }
+            break;
+        case 'L':
+            if (ctrl) {
+                g.ctrl_key = true;
+                stop_talking(false);
+                set_edit_text(L"");
+                g.edit_from_cmd = false;
+                set_rows(NULL, 0, true);
+                set_status(L"", ST_IDLE);
+                return 0;
+            }
             break;
         default:
             if (ctrl && w >= '1' && w <= '8') { pick_row((int)(w - '1'), shift); return 0; }
@@ -1108,6 +1181,7 @@ static LRESULT CALLBACK edit_proc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR i
         if (w == L'\r' || w == L'\n' || w == 27) return 0;
         if (w == L' ' && g.ctrl_space) { g.ctrl_space = false; return 0; }
         if (w == 8 && g.ctrl_h) { g.ctrl_h = false; return 0; }   /* Ctrl+H = backspace char */
+        if ((w == 13 || w == 12) && g.ctrl_key) { g.ctrl_key = false; return 0; }   /* Ctrl+M, Ctrl+L chars */
         if (w >= L' ' && w != 127) stop_listening_for_typing();
         break;
     case WM_NCDESTROY:
@@ -1269,6 +1343,11 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
             KillTimer(h, T_CLOSECAP);
             if (g.close_pending) begin_close();
             break;
+        case T_LINGER:
+            KillTimer(h, T_LINGER);
+            g.linger = false;
+            pill_refresh();
+            break;
         }
         return 0;
     case WM_APP_VOICE:
@@ -1276,6 +1355,11 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         return 0;
     case WM_APP_TOGGLE:
         if (g.closing) return 0;
+        if (g.speaking && voice_available()) {   /* talking: stop and listen to the user */
+            if (!g.bg && GetForegroundWindow() != g.hwnd) force_foreground();
+            stop_talking(true);
+            return 0;
+        }
         if (g.bg) {
             /* hidden: Copilot key again = stop listening; with nothing on
              * screen there is nothing left to do, so exit quietly */
@@ -1372,11 +1456,16 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         }
         int r = row_at((short)LOWORD(l), (short)HIWORD(l));
         if (r != g.hover) { g.hover = r; invalidate_rows(); }
+        POINT mpt = { (short)LOWORD(l), (short)HIWORD(l) };
         if (has_close_btn()) {
-            POINT pt = { (short)LOWORD(l), (short)HIWORD(l) };
             RECT cr = close_rect();
-            bool on = PtInRect(&cr, pt) != FALSE;
+            bool on = PtInRect(&cr, mpt) != FALSE;
             if (on != g.close_hover) { g.close_hover = on; InvalidateRect(h, &cr, FALSE); }
+        }
+        {
+            RECT mr = mute_rect();
+            bool on = PtInRect(&mr, mpt) != FALSE;
+            if (on != g.mute_hover) { g.mute_hover = on; InvalidateRect(h, &mr, FALSE); }
         }
         return 0;
     }
@@ -1388,14 +1477,20 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
             g.close_hover = false;
             InvalidateRect(h, &cr, FALSE);
         }
+        if (g.mute_hover) {
+            RECT mr = mute_rect();
+            g.mute_hover = false;
+            InvalidateRect(h, &mr, FALSE);
+        }
         return 0;
     case WM_SETCURSOR:
         if (LOWORD(l) == HTCLIENT) {
             POINT pt;
             GetCursorPos(&pt);
             ScreenToClient(h, &pt);
-            RECT dr = dot_rect(), cr = close_rect();
-            bool hand = PtInRect(&dr, pt) || row_at(pt.x, pt.y) >= 0 || (has_close_btn() && PtInRect(&cr, pt));
+            RECT dr = dot_rect(), cr = close_rect(), mr = mute_rect(), sr = status_rect();
+            bool hand = PtInRect(&dr, pt) || row_at(pt.x, pt.y) >= 0 || (has_close_btn() && PtInRect(&cr, pt)) ||
+                        PtInRect(&mr, pt) || (g.speaking && g.status[0] && PtInRect(&sr, pt));
             SetCursor(LoadCursorW(NULL, hand ? IDC_HAND : IDC_ARROW));
             return TRUE;
         }
@@ -1410,6 +1505,10 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
             begin_close();
             return 0;
         }
+        RECT mr = mute_rect();
+        if (PtInRect(&mr, pt)) { toggle_mute(); return 0; }
+        RECT sr = status_rect();
+        if (g.speaking && g.status[0] && PtInRect(&sr, pt)) { stop_talking(false); return 0; }
         int r = row_at(pt.x, pt.y);
         if (r >= 0) {
             g.sel = r;

@@ -131,7 +131,7 @@ static void record(const wchar_t *fmt, ...)
 }
 
 /* an action completed: close the overlay, forget any list */
-static void done(CmdResult *r) { r->close = true; r->speak = true; s_nrows = 0; }
+static void done(CmdResult *r) { r->close = true; r->speak = true; r->ack = true; s_nrows = 0; }
 
 static bool dialog_active(void) { return s_dialog && dialog_alive(s_dialog); }
 static bool is_shell_path(const wchar_t *p) { return _wcsnicmp(p, L"shell:", 6) == 0; }
@@ -205,7 +205,7 @@ static void normalize(const wchar_t *in, wchar_t *out, size_t cap)
             if (cut_suffix(out, *p)) again = true;
         /* "open downloads, jarvis" - but keep it in "search github for jarvis" */
         static WList KEEP_BEFORE = { L"for", L"about", L"called", L"named", L"search", L"find", L"google",
-                                     L"youtube", L"github", L"wikipedia", L"open", NULL };
+                                     L"youtube", L"github", L"wikipedia", L"open", L"mute", L"unmute", NULL };
         size_t L = wcslen(out);
         if (L > 7 && str_ends(out, L" jarvis")) {
             wchar_t prev[64] = L"";
@@ -939,6 +939,21 @@ static WList REINDEX_W = { L"reindex", L"re index", L"refresh index", L"refresh 
     L"rebuild the index", L"update index", L"update the index", L"rescan", L"re scan", L"rescan files",
     L"refresh files", L"index files", L"reindex files", NULL };
 
+/* JARVIS's own voice ("mute" alone is the PC's volume) */
+static WList HUSH_W = { L"mute jarvis", L"mute yourself", L"mute your voice", L"stop talking", L"stop speaking",
+    L"be quiet", L"shut up", L"quiet", L"quiet mode", L"silent mode", L"silence jarvis", L"voice off",
+    L"turn off voice", L"turn off your voice", L"turn your voice off", L"don't talk", L"dont talk",
+    L"don't speak", L"dont speak", L"no voice", L"text only", L"stay quiet", L"keep quiet", NULL };
+static WList VOICE_W = { L"unmute jarvis", L"un mute jarvis", L"unmute yourself", L"voice on", L"turn on voice",
+    L"turn on your voice", L"turn your voice on", L"talk to me", L"start talking", L"start speaking",
+    L"you can talk", L"you can talk again", L"talk again", L"speak again", L"speak up", NULL };
+static WList LESS_W = { L"talk less", L"speak less", L"less talking", L"short replies", L"only answers",
+    L"stop confirming", L"don't confirm", L"dont confirm", L"no confirmations", L"quiet confirmations", NULL };
+static WList MORE_W = { L"talk more", L"speak more", L"full replies", L"confirm everything", L"confirm actions",
+    L"say everything", L"tell me everything", NULL };
+static WList CLEAR_W = { L"clear", L"clear screen", L"clear the screen", L"clear it", L"clear all",
+    L"clear everything", L"clear results", L"clear the results", L"clear that", L"clear this", L"clean up", NULL };
+
 static bool is_battery(const wchar_t *s)
 {
     return (contains_word(s, L"battery") || contains_word(s, L"charge")) && wcslen(s) < 48;
@@ -946,7 +961,8 @@ static bool is_battery(const wchar_t *s)
 
 static bool is_fixed(const wchar_t *s)
 {
-    const wchar_t *const *lists[] = { CLOSE_W, HELP_W, TIME_W, DATE_W, LOCK_W, SHOT_W, VUP_W, VDN_W, MUTE_W, REINDEX_W };
+    const wchar_t *const *lists[] = { CLOSE_W, HELP_W, TIME_W, DATE_W, LOCK_W, SHOT_W, VUP_W, VDN_W, MUTE_W, REINDEX_W,
+                                      HUSH_W, VOICE_W, LESS_W, MORE_W, CLEAR_W };
     for (size_t i = 0; i < sizeof lists / sizeof lists[0]; i++) if (in_list(s, lists[i])) return true;
     return is_battery(s);
 }
@@ -961,7 +977,7 @@ static void show_help(CmdResult *r)
         {L"convert resume to pdf", L"PDF \x2194 Word, slides, sheets, images"},
         {L"split physics notes at page 5 and save it in downloads", L"Split, extract pages, merge PDFs"},
         {L"rename this to final report", L"Rename, move, copy, delete selected files"},
-        {L"what time is it, volume up, lock", L"Time, date, battery and your PC"},
+        {L"what time is it, volume up, mute jarvis", L"Time, battery, your PC, JARVIS's voice"},
     };
     int n = (int)(sizeof H / sizeof H[0]);
     if (n > MAX_HITS) n = MAX_HITS;
@@ -979,9 +995,45 @@ static void show_help(CmdResult *r)
     record(L"SAY");
 }
 
+/* "mute jarvis" / "unmute jarvis": saved in jarvis.ini (not in dry-run) */
+static void set_voice(bool on, CmdResult *r)
+{
+    record(L"SET speak=%d", on ? 1 : 0);
+    bool was = g_cfg.speak;
+    g_cfg.speak = on;
+    if (!s_dry && was != on) config_save_int(L"general", L"speak", on);
+    if (on) reply(r, was ? L"My voice is already on." : L"Voice on.");
+    else reply(r, was ? L"Okay, I'll stay quiet. Say unmute jarvis or press Ctrl+M to hear me again."
+                      : L"I'm already muted. Say unmute jarvis or press Ctrl+M to hear me again.");
+    r->speak = on;
+}
+
+static void set_confirm(bool on, CmdResult *r)
+{
+    record(L"SET speak_confirm=%d", on ? 1 : 0);
+    bool was = g_cfg.speak_confirm;
+    g_cfg.speak_confirm = on;
+    if (!s_dry && was != on) config_save_int(L"general", L"speak_confirm", on);
+    if (on) reply(r, L"Okay, I'll tell you everything I do.");
+    else reply(r, L"Okay, I'll only speak answers and questions. Say talk more to hear everything.");
+    r->speak = true;
+}
+
 static bool run_fixed(const wchar_t *s, CmdResult *r)
 {
     wchar_t buf[128];
+    if (in_list(s, HUSH_W))  { set_voice(false, r); return true; }
+    if (in_list(s, VOICE_W)) { set_voice(true, r); return true; }
+    if (in_list(s, LESS_W))  { set_confirm(false, r); return true; }
+    if (in_list(s, MORE_W))  { set_confirm(true, r); return true; }
+    if (in_list(s, CLEAR_W)) {
+        record(L"CLEAR");
+        r->clear = true;
+        r->speak = false;
+        r->rows_replace = true;   /* nrows 0: the list goes away */
+        s_nrows = 0;
+        return true;
+    }
     if (in_list(s, CLOSE_W)) {
         record(L"CLOSE");
         reply(r, L"Okay.");
@@ -993,12 +1045,12 @@ static bool run_fixed(const wchar_t *s, CmdResult *r)
     if (in_list(s, TIME_W)) {
         if (!GetTimeFormatEx(LOCALE_NAME_USER_DEFAULT, TIME_NOSECONDS, NULL, NULL, buf, 128)) buf[0] = 0;
         reply(r, L"It's %ls.", buf);
-        record(L"SAY"); done(r); return true;
+        record(L"SAY"); done(r); r->ack = false; return true;
     }
     if (in_list(s, DATE_W)) {
         if (!GetDateFormatEx(LOCALE_NAME_USER_DEFAULT, DATE_LONGDATE, NULL, NULL, buf, 128, NULL)) buf[0] = 0;
         reply(r, L"Today is %ls.", buf);
-        record(L"SAY"); done(r); return true;
+        record(L"SAY"); done(r); r->ack = false; return true;
     }
     if (is_battery(s)) {
         SYSTEM_POWER_STATUS ps;
@@ -1007,7 +1059,7 @@ static bool run_fixed(const wchar_t *s, CmdResult *r)
         else
             reply(r, L"Battery is at %d percent%ls.", ps.BatteryLifePercent,
                   (ps.BatteryFlag & 8) ? L", charging" : ps.ACLineStatus == 1 ? L", plugged in" : L"");
-        record(L"SAY"); done(r); return true;
+        record(L"SAY"); done(r); r->ack = false; return true;
     }
     if (in_list(s, LOCK_W))    { act_sys(L"lock"); reply(r, L"Locking."); done(r); return true; }
     if (in_list(s, SHOT_W))    { act_sys(L"screenshot"); reply(r, L"Select an area."); done(r); return true; }
@@ -1790,6 +1842,7 @@ static bool run_delete_answer(const wchar_t *s, CmdResult *r)
         if (res.ok && _wcsicmp(s_last, s_del) == 0) s_last[0] = 0;
         for (int i = 0; i < s_nsel; i++) if (_wcsicmp(s_sel[i], s_del) == 0) s_nsel = 0;
         done(r);
+        r->ack = res.ok;   /* a failure is always spoken */
         return true;
     }
     if (in_list(s, NO_W)) { record(L"SAY"); reply(r, L"Okay, I kept %ls.", n0); done(r); return true; }
@@ -2004,6 +2057,7 @@ static bool try_browser(const wchar_t *s, CmdResult *r)
             reply(r, L"%ls isn't installed, opening in %ls.", b->disp, cfg);
         else
             reply(r, L"%ls isn't installed, opening in your default browser.", b->disp);
+        r->ack = false;   /* worth hearing */
     } else {
         size_t n = wcslen(r->reply);
         if (n && r->reply[n - 1] == L'.') r->reply[--n] = 0;
@@ -2146,6 +2200,8 @@ void cmd_grammar(PhraseFn fn, void *ctx)
         L"number three", L"number four", L"number five", L"number six", L"number seven", L"number eight",
         L"first", L"second", L"third", L"fourth", L"fifth", L"sixth", L"seventh", L"eighth",
         L"show in folder", L"what can you do", L"what day is it", L"yes", L"no",
+        L"mute jarvis", L"unmute jarvis", L"stop talking", L"be quiet", L"voice off", L"voice on",
+        L"talk less", L"talk more", L"clear", L"clear screen",
         L"convert this to pdf", L"convert this to word", L"merge these", L"delete this", NULL };
     for (const wchar_t *const *v = VERBS; *v; v++) fn(*v, NULL, ctx);
     const KVList *lists[] = { &g_cfg.sites, &g_cfg.apps, &g_cfg.folders };

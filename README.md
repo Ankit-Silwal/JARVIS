@@ -125,8 +125,22 @@ Open the Upload window first (for example "Upload file" on Google Drive in Chrom
 | "lock" | Locks the PC |
 | "screenshot" | Takes a screenshot |
 | "reindex" | Re-scans your files now |
+| "clear" / "clear screen" | Empties the box, the reply and the list (also **Ctrl+L**) |
 | "help" | Shows example commands |
 | "close" / "exit" / "bye" | Closes JARVIS ("never mind" just cancels) |
+
+### JARVIS's voice
+
+| Say / do | What happens |
+|---|---|
+| **Esc**, the **Copilot key** or **F2** while JARVIS talks, or click the reply | Stops talking right away (Copilot key / F2 then listen to you; a second Esc closes) |
+| "mute jarvis" / "stop talking" / "be quiet" / "voice off" | JARVIS stops speaking. Replies are only shown. Saved in `jarvis.ini` (`speak=0`) |
+| "unmute jarvis" / "voice on" / "talk to me" | Speaks again (`speak=1`) |
+| The speaker button next to **×**, or **Ctrl+M** | Mute / unmute |
+| "talk less" / "only answers" | Stops saying confirmations like "Opening Downloads." Answers, questions and problems are still spoken (`speak_confirm=0`) |
+| "talk more" | Says everything again (`speak_confirm=1`) |
+
+"mute" on its own still mutes the PC's sound, like the volume key.
 
 ### Keyboard
 
@@ -137,8 +151,11 @@ You can also just type. Results show up live while you type.
 | Enter | Open the selected result |
 | Shift + Enter | Show it in its folder |
 | Up / Down | Move through results |
-| F2, Ctrl + Space, or the Copilot key again | Mic on / off |
-| Esc, Alt + F4, or the × button | Close JARVIS |
+| F2, Ctrl + Space, or the Copilot key again | Mic on / off (while JARVIS talks: stop it and listen) |
+| Ctrl + M | Mute / unmute JARVIS's voice |
+| Ctrl + L | Clear the box and the results |
+| Esc | Stop talking; if it isn't talking, close JARVIS |
+| Alt + F4, or the × button | Close JARVIS |
 
 ---
 
@@ -149,7 +166,7 @@ Names on the left are what you **say** (lowercase). Delete the file to get the d
 
 | Section | What it's for |
 |---|---|
-| `[general]` | `mode` (normal / background), `stay_open` (1 = stay until you close it, 0 = close after each answer), `speak`, `listen_on_start`, `voice` (David / Zira), `voice_rate` (-10..10), `close_delay_ms`, `browser`, `index_max_age_min` |
+| `[general]` | `mode` (normal / background), `stay_open` (1 = stay until you close it, 0 = close after each answer), `speak` (0 = muted), `speak_confirm` (0 = "talk less"), `listen_on_start`, `voice` (David / Zira), `voice_rate` (-10..10), `close_delay_ms`, `browser`, `index_max_age_min` |
 | `[search]` | `roots` = extra folders to index (separate with `;`), `skip` = folder names never scanned |
 | `[sites]` | spoken name = website |
 | `[apps]` | spoken name = program, `ms-settings:` link, etc. |
