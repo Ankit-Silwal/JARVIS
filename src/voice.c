@@ -71,7 +71,8 @@ static void add_phrase(const wchar_t *verb, const wchar_t *name, void *p)
     else if (!verb && name) hr = ISpRecoGrammar_AddWordTransition(g_cmds, g->mid, NULL, name, L" ", SPWT_LEXICAL, 1.0f, NULL);
     else if (verb && name) {
         wchar_t full[256];
-        swprintf(full, 256, L"%ls %ls", verb, name);
+        if (name[0]) swprintf(full, 256, L"%ls %ls", verb, name);
+        else str_copy(full, 256, verb);
         hr = ISpRecoGrammar_AddWordTransition(g_cmds, g->single, NULL, full, L" ", SPWT_LEXICAL, 1.0f, NULL);
     } else return;
     if (SUCCEEDED(hr)) g->n++;
