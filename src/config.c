@@ -100,6 +100,11 @@ L"word=winword.exe\r\n"
 L"powerpoint=powerpnt.exe\r\n"
 L"excel=excel.exe\r\n"
 L"\r\n"
+L"[docs]\r\n"
+L"; Python with PyMuPDF (pip install pymupdf) for splitting / merging PDFs.\r\n"
+L"; Empty = look for Anaconda, python.org installs and python.exe on PATH.\r\n"
+L"python=\r\n"
+L"\r\n"
 L"[folders]\r\n"
 L"; your own spoken shortcuts to folders, e.g.\r\n"
 L"; projects=C:\\Studies\\Web Development\r\n"
@@ -269,6 +274,9 @@ void config_load(void)
         wchar_t b[MAX_PATH];   /* %LOCALAPPDATA%\...\browser.exe like the [apps] values */
         read_str(L"general", L"browser", L"chrome.exe", b, MAX_PATH);
         expand_env(b, g_cfg.browser, MAX_PATH);
+        /* [docs] python=: interpreter with PyMuPDF for PDF split/merge (empty: find one) */
+        read_str(L"docs", L"python", L"", b, MAX_PATH);
+        expand_env(b, g_cfg.docs_python, MAX_PATH);
     }
 
     /* built-in folders (spoken name -> path); [folders] in the ini can add/override */

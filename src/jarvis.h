@@ -24,6 +24,7 @@
 #define WM_APP_TOGGLE   (WM_APP + 1)   /* another instance was launched: toggle mic */
 #define WM_APP_VOICE    (WM_APP + 2)   /* event from voice thread, wParam = VoiceEvent */
 #define WM_APP_RUN      (WM_APP + 3)   /* run a command string (lParam = heap wchar_t*) */
+#define WM_APP_TASK     (WM_APP + 4)   /* document task finished (lParam = heap DocResult*) */
 
 /* ------------------------------------------------------------------ util.c */
 typedef struct {
@@ -72,6 +73,7 @@ typedef struct {
     int   index_max_age_min;
     int   close_delay_ms;
     wchar_t browser[MAX_PATH];
+    wchar_t docs_python[MAX_PATH];  /* [docs] python= (empty: auto-detect) */
     wchar_t ini_path[MAX_PATH];
     wchar_t data_dir[MAX_PATH];
     wchar_t exe_dir[MAX_PATH];
@@ -169,6 +171,10 @@ typedef struct {
 } CmdResult;
 
 void cmd_init(HWND dialog);
+/* window that receives WM_APP_TASK when a background document task ends */
+void cmd_set_notify(HWND hwnd);
+/* files selected in Explorer / on the Desktop when JARVIS started ("this", "these") */
+void cmd_set_selection(const wchar_t (*paths)[MAX_PATH], int n);
 HWND cmd_dialog(void);
 /* Dry-run (tests / --dry-run): actions are NOT performed, they are recorded
  * instead and can be read with cmd_last_action(). Format, one action:
@@ -181,16 +187,71 @@ HWND cmd_dialog(void);
  *   "LIST <n>"           showed n rows for the user to pick from
  *   "SAY"                only replied (time, date, battery, help, not found...)
  *   "CLOSE"              closed without doing anything
+ *   "DOC convert-pdf <src> -> <dst>"           Word/PowerPoint/Excel/image to PDF
+ *   "DOC convert-docx <src> -> <dst>"          PDF to Word
+ *   "DOC split <src> @<N> -> <dst1> | <dst2>"  pages 1..N and N+1..end
+ *   "DOC extract <src> <A>-<B> -> <dst>"       pages A..B into a new PDF
+ *   "DOC merge <src1> + <src2> [+ ...] -> <dst>"
+ *   "DOC pages <src>"                          count the pages of a PDF
+ *   "FILE rename|move|copy <src> -> <dst>"     never overwrites (" (2)" added)
+ *   "ASK delete <path>"  asked "move X to the Recycle Bin?" (nothing deleted yet)
+ *   "FILE delete <path>" sent to the Recycle Bin after the user said yes
+ * Document actions run on a worker thread (outside dry-run): the reply is
+ * "Converting X..." and the outcome arrives later as WM_APP_TASK.
  * Empty string if nothing happened yet. */
 void cmd_set_dry_run(bool on);
 const wchar_t *cmd_last_action(void);
 void cmd_run(const wchar_t *text, CmdResult *r);
 void cmd_pick(const Row *row, PickMode mode, CmdResult *r);
+/* WM_APP_TASK arrived: turns the DocResult into a reply + rows (caller frees d) */
+struct DocResult;
+void cmd_task_done(const struct DocResult *d, CmdResult *r);
 /* Live results while typing; returns number of rows */
 int  cmd_preview(const wchar_t *text, Row *rows, int max);
 /* phrases for the voice command grammar */
 typedef void (*PhraseFn)(const wchar_t *verb, const wchar_t *name, void *ctx);
 void cmd_grammar(PhraseFn fn, void *ctx);
+
+/* ------------------------------------------------------------------ docs.c */
+/* Everyday document jobs. Conversions go through Microsoft Office (COM),
+ * PDF page work through Python + PyMuPDF (hidden child process). Outputs
+ * never overwrite: "a.pdf" becomes "a (2).pdf" when the name is taken. */
+typedef enum {
+    DOC_NONE, DOC_TO_PDF, DOC_TO_DOCX, DOC_SPLIT, DOC_EXTRACT, DOC_MERGE, DOC_PAGES,
+    DOC_RENAME, DOC_MOVE, DOC_COPY, DOC_DELETE
+} DocOp;
+
+#define DOC_MAX_SRC 8
+
+typedef struct {
+    DocOp   op;
+    int     nsrc;
+    wchar_t src[DOC_MAX_SRC][MAX_PATH];
+    wchar_t dst[2][MAX_PATH];   /* wanted output path(s); made unique when run */
+    int     a, b;               /* split: a = last page of part 1; extract: pages a..b */
+} DocTask;
+
+typedef struct DocResult {
+    DocOp   op;
+    bool    ok;
+    wchar_t reply[300];
+    int     nout;
+    wchar_t out[2][MAX_PATH];   /* files produced */
+} DocResult;
+
+/* free name: the path itself, or "a (2).pdf", "a (3).pdf" ... */
+void docs_unique(const wchar_t *want, wchar_t *out);
+/* runs the task on this thread (COM must be initialized for Office jobs) */
+bool docs_run(const DocTask *t, DocResult *res);
+/* runs it on a worker thread and posts WM_APP_TASK (lParam = malloc'd
+ * DocResult, receiver frees) to notify. false if a task is already running. */
+bool docs_run_async(const DocTask *t, HWND notify);
+bool docs_busy(void);
+void docs_wait(DWORD ms);
+/* why this path must not be deleted (drive root, user folder...), or NULL */
+const wchar_t *docs_protected(const wchar_t *path);
+/* files selected in the Explorer window / Desktop fg; returns the count */
+int  shell_selection(HWND fg, wchar_t (*out)[MAX_PATH], int max);
 
 /* --------------------------------------------------------------------- ui.c */
 /* initial_cmd: optional command to run right away (from the command line).

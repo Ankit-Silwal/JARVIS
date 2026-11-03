@@ -12,7 +12,7 @@ rem (the default manifest object breaks the linker); we ship our own manifest.
 gcc -std=c11 -Os -Wall -Wextra -Wno-unused-parameter -municode -mwindows ^
   -DUNICODE -D_UNICODE -D_WIN32_WINNT=0x0A00 -DWINVER=0x0A00 ^
   -specs=tools\nomanifest.specs ^
-  src\main.c src\ui.c src\commands.c src\search.c src\voice.c src\dialog.c src\config.c src\util.c ^
+  src\main.c src\ui.c src\commands.c src\search.c src\voice.c src\dialog.c src\config.c src\util.c src\docs.c ^
   build\jarvis_res.o -o build\jarvis.exe ^
   -lole32 -loleaut32 -luuid -lshell32 -lshlwapi -lgdi32 -luser32 -ldwmapi -lcomctl32 -s
 if errorlevel 1 goto :fail

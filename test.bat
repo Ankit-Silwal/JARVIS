@@ -16,6 +16,10 @@ echo === building test_search
 gcc %CFLAGS% tests\test_search.c src\search.c src\util.c src\config.c -o build\tests\test_search.exe %LIBS%
 if errorlevel 1 goto :fail
 
+echo === building test_docs (runs only with JARVIS_DOCS_TEST=1)
+gcc %CFLAGS% tests\test_docs.c src\docs.c src\util.c src\config.c -o build\tests\test_docs.exe %LIBS% -loleaut32
+if errorlevel 1 goto :fail
+
 echo.
 echo === running test_util
 build\tests\test_util.exe
@@ -24,6 +28,11 @@ if errorlevel 1 goto :fail
 echo.
 echo === running test_search
 build\tests\test_search.exe
+if errorlevel 1 goto :fail
+
+echo.
+echo === running test_docs
+build\tests\test_docs.exe
 if errorlevel 1 goto :fail
 
 echo.
