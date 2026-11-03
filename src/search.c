@@ -257,13 +257,16 @@ static Index *index_load(void)
         char *nl = strchr(p, '\n');
         if (!nl) break;
         *nl = 0;
+        if (nl > p && nl[-1] == '\r') nl[-1] = 0;   /* file re-saved with CRLF */
         /* kind \t depth \t time \t path */
         char kind = p[0];
         char *t1 = strchr(p, '\t');
         char *t2 = t1 ? strchr(t1 + 1, '\t') : NULL;
         char *t3 = t2 ? strchr(t2 + 1, '\t') : NULL;
-        if (t3) {
+        if (t3 && t1 == p + 1 && (kind == 'D' || kind == 'F')) {
             int depth = atoi(t1 + 1);
+            if (depth < 0) depth = 0;
+            if (depth > MAX_DEPTH) depth = MAX_DEPTH;
             unsigned long long t = strtoull(t2 + 1, NULL, 16);
             int n = MultiByteToWideChar(CP_UTF8, 0, t3 + 1, -1, wpath, MAX_PATH);
             if (n > 1) {
