@@ -7,11 +7,13 @@ Press the **Copilot key**, say what you want, and JARVIS does it.
 - **Find files you lost** with fuzzy search: "find physics notes", then say "two"
 - **Newest stuff fast**: "open latest photo", "open latest download", "open newest pdf in documents"
 - **Fill Upload / Open dialogs** (Google Drive in Chrome, Gmail, Office...): "upload resume"
-- **Web**: open Chrome, YouTube, Gmail, Drive, Classroom; Google / YouTube / Wikipedia searches; directions
+- **Web**: open Chrome, YouTube, Gmail, Drive, Classroom; Google / YouTube / Wikipedia searches; directions;
+  pick the browser: "open youtube in brave", "google black holes in firefox"
 - **Apps**: VS Code, Word, or any app in your Start Menu
 - **Little things**: time, date, battery, volume, lock, screenshot
 - **Works offline**: uses the speech recognizer and voices built into Windows. Nothing leaves your PC.
-- **Small**: one `.exe` + one `jarvis.ini`. Nothing runs in the background when it's closed.
+- **Stays until you close it**: ask one thing after another. Close with Esc, the **×** button, or say "close".
+- **Small**: one `.exe` + one `jarvis.ini`. Nothing runs in the background once you close it.
 
 ---
 
@@ -37,7 +39,14 @@ Press the **Copilot key**, say what you want, and JARVIS does it.
 
 Full step-by-step guide: **[docs/COPILOT_KEY.md](docs/COPILOT_KEY.md)**
 
-Press the key once → JARVIS opens and listens. Press it again → mic on/off.
+Press the key once → JARVIS opens and listens. Press it again → mic on/off (or, if JARVIS is
+behind another window, it comes back to the front and listens).
+
+JARVIS stays open after answering (`stay_open=1`, the default): after a spoken command it listens
+for the next one; after a typed one you can just type again. Opening an app or website doesn't close
+it; it steps behind that window instead of covering it. Close it with **Esc**, **Alt+F4**, the small
+**×** at the right of the box, or by saying **"close"** / **"exit"** / **"bye"** / **"that's all"**.
+Set `stay_open=0` to close after every answer instead.
 
 ---
 
@@ -97,8 +106,9 @@ Open the Upload window first (for example "Upload file" on Google Drive in Chrom
 
 | Say | What happens |
 |---|---|
-| "open chrome" | Opens Chrome |
+| "open chrome" / "open brave" / "open firefox" | Opens that browser |
 | "open youtube" / "open gmail" / "open drive" / "open classroom" | Opens that site (more in `jarvis.ini`) |
+| "open youtube in brave" / "youtube lofi in edge" | Opens it in that browser (chrome, brave, edge, firefox, opera). Without a browser name, `browser=` in `jarvis.ini` is used |
 | "google black holes" | Google search |
 | "youtube lofi music" | YouTube search |
 | "wikipedia nepal" | Wikipedia search |
@@ -116,7 +126,7 @@ Open the Upload window first (for example "Upload file" on Google Drive in Chrom
 | "screenshot" | Takes a screenshot |
 | "reindex" | Re-scans your files now |
 | "help" | Shows example commands |
-| "cancel" | Closes JARVIS |
+| "close" / "exit" / "bye" | Closes JARVIS ("never mind" just cancels) |
 
 ### Keyboard
 
@@ -128,7 +138,7 @@ You can also just type. Results show up live while you type.
 | Shift + Enter | Show it in its folder |
 | Up / Down | Move through results |
 | F2, Ctrl + Space, or the Copilot key again | Mic on / off |
-| Esc | Close |
+| Esc, Alt + F4, or the × button | Close JARVIS |
 
 ---
 
@@ -139,7 +149,7 @@ Names on the left are what you **say** (lowercase). Delete the file to get the d
 
 | Section | What it's for |
 |---|---|
-| `[general]` | `mode` (normal / background), `speak`, `listen_on_start`, `voice` (David / Zira), `voice_rate` (-10..10), `close_delay_ms`, `browser`, `index_max_age_min` |
+| `[general]` | `mode` (normal / background), `stay_open` (1 = stay until you close it, 0 = close after each answer), `speak`, `listen_on_start`, `voice` (David / Zira), `voice_rate` (-10..10), `close_delay_ms`, `browser`, `index_max_age_min` |
 | `[search]` | `roots` = extra folders to index (separate with `;`), `skip` = folder names never scanned |
 | `[sites]` | spoken name = website |
 | `[apps]` | spoken name = program, `ms-settings:` link, etc. |
@@ -172,7 +182,8 @@ Desktop, Documents, Downloads, Pictures, Videos, Music and OneDrive are always i
 
 ## Privacy and performance
 
-- **Nothing runs in the background.** JARVIS starts when you press the key and closes when it's done.
+- **Nothing runs once you close it.** While open and idle it uses no timers and no polling
+  (with `stay_open=0` it closes by itself after each answer).
 - **Nothing leaves your PC.** Speech recognition and voices are the ones built into Windows.
 - File index: `%LOCALAPPDATA%\JARVIS\index.txt`. It loads in milliseconds. When it's older than
   `index_max_age_min` (default 30 min), JARVIS re-scans in the background while you use it.
@@ -206,6 +217,11 @@ Tip: use Command Prompt. In PowerShell add `| Out-String` at the end so it waits
 Other options: `jarvis.exe --type` (open without listening), `jarvis.exe --background` (no window: just listen and talk; a small "Listening…" pill shows at the bottom and the bar appears only when you need to pick from a list), `jarvis.exe --normal` (always show the bar), `jarvis.exe "open downloads"` (run a command right away).
 
 While the bar is open, say or type **"hide"** / **"background mode"** (or press **Ctrl+H**) to keep going in the background; say **"show window"** to bring it back. Set `mode=background` in `jarvis.ini` to always start hidden.
+
+In background mode with `stay_open=1`, JARVIS keeps running after it answers: it listens once more,
+then waits quietly with a **tray icon** ("JARVIS — background"). Press the Copilot key to talk again,
+left-click the icon to show the bar, or right-click it for **Show** / **Exit**. Say "close" or
+"exit" to end it.
 
 ---
 

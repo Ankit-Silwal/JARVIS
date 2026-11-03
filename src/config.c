@@ -19,7 +19,9 @@ L"listen_on_start=1\r\n"
 L"; voice to use (part of the name: David, Zira, ...) and speed -10..10\r\n"
 L"voice=David\r\n"
 L"voice_rate=1\r\n"
-L"; how long the reply stays on screen before JARVIS closes (ms)\r\n"
+L"; keep JARVIS open after a command (1) or close after each answer (0)\r\n"
+L"stay_open=1\r\n"
+L"; with stay_open=0: how long the reply stays on screen before JARVIS closes (ms)\r\n"
 L"close_delay_ms=1100\r\n"
 L"; browser used for websites and web searches\r\n"
 L"browser=chrome.exe\r\n"
@@ -73,6 +75,9 @@ L"chrome=chrome.exe\r\n"
 L"google chrome=chrome.exe\r\n"
 L"incognito=chrome.exe --incognito\r\n"
 L"edge=msedge.exe\r\n"
+L"brave=brave.exe\r\n"
+L"firefox=firefox.exe\r\n"
+L"opera=opera.exe\r\n"
 L"vs code=%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\Code.exe\r\n"
 L"vscode=%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\Code.exe\r\n"
 L"visual studio code=%LOCALAPPDATA%\\Programs\\Microsoft VS Code\\Code.exe\r\n"
@@ -266,6 +271,7 @@ void config_load(void)
         read_str(L"general", L"mode", L"normal", mode, 32);
         g_cfg.background = _wcsicmp(mode, L"background") == 0 || _wcsicmp(mode, L"hidden") == 0;
     }
+    g_cfg.stay_open = read_int(L"general", L"stay_open", 1) != 0;
     g_cfg.voice_rate = read_int(L"general", L"voice_rate", 1);
     g_cfg.close_delay_ms = read_int(L"general", L"close_delay_ms", 1100);
     g_cfg.index_max_age_min = read_int(L"general", L"index_max_age_min", 30);
@@ -303,6 +309,10 @@ void config_load(void)
 
     load_section(L"folders", &g_cfg.folders, true);
     load_section(L"sites", &g_cfg.sites, false);
+    /* browsers can be opened by name even with an older jarvis.ini; [apps] overrides */
+    kv_add(&g_cfg.apps, L"brave", L"brave.exe");
+    kv_add(&g_cfg.apps, L"firefox", L"firefox.exe");
+    kv_add(&g_cfg.apps, L"opera", L"opera.exe");
     load_section(L"apps", &g_cfg.apps, true);
 
     /* index roots: standard user folders + OneDrive + [search] roots */
