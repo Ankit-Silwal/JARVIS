@@ -1322,9 +1322,19 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
         if (g.stay) {
             /* stay_open: never close on focus loss; just stop covering the
              * app that took focus (the browser JARVIS just opened...) */
-            if (!g.bg && !g.closing)
-                SetWindowPos(h, LOWORD(w) == WA_INACTIVE ? HWND_NOTOPMOST : HWND_TOPMOST, 0, 0, 0, 0,
-                             SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE);
+            if (!g.bg && !g.closing) {
+                UINT f = SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE;
+                if (LOWORD(w) == WA_INACTIVE) {
+                    /* NOTOPMOST alone puts us on top of the normal windows,
+                     * i.e. still over the app that just took focus: go behind it */
+                    SetWindowPos(h, HWND_NOTOPMOST, 0, 0, 0, 0, f);
+                    HWND other = l ? GetAncestor((HWND)l, GA_ROOT) : GetForegroundWindow();
+                    if (other && other != h && !(GetWindowLongW(other, GWL_EXSTYLE) & WS_EX_TOPMOST))
+                        SetWindowPos(h, other, 0, 0, 0, 0, f);
+                } else {
+                    SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, f);
+                }
+            }
             if (LOWORD(w) != WA_INACTIVE && g.edit) SetFocus(g.edit);
             return 0;
         }
