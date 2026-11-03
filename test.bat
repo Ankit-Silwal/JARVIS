@@ -17,11 +17,11 @@ gcc %CFLAGS% tests\test_search.c src\search.c src\util.c src\config.c -o build\t
 if errorlevel 1 goto :fail
 
 echo === building test_docs_cmd
-gcc %CFLAGS% tests\test_docs_cmd.c src\commands.c src\search.c src\dialog.c src\docs.c src\util.c src\config.c -o build\tests\test_docs_cmd.exe %LIBS% -loleaut32
+gcc %CFLAGS% tests\test_docs_cmd.c src\commands.c src\search.c src\dialog.c src\docs.c src\util.c src\config.c src\sys.c -o build\tests\test_docs_cmd.exe %LIBS% -loleaut32 -lpowrprof
 if errorlevel 1 goto :fail
 
 echo === building test_cmd
-gcc %CFLAGS% tests\test_cmd.c src\commands.c src\search.c src\dialog.c src\docs.c src\util.c src\config.c -o build\tests\test_cmd.exe %LIBS% -loleaut32
+gcc %CFLAGS% tests\test_cmd.c src\commands.c src\search.c src\dialog.c src\docs.c src\util.c src\config.c src\sys.c -o build\tests\test_cmd.exe %LIBS% -loleaut32 -lpowrprof
 if errorlevel 1 goto :fail
 
 echo === building test_whisper

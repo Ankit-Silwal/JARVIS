@@ -162,6 +162,27 @@ Open the Upload window first (for example "Upload file" on Google Drive in Chrom
 | "help" | Shows example commands |
 | "close" / "exit" / "bye" | Closes JARVIS ("never mind" just cancels) |
 
+### Timers, reminders, notes, calculator, music, power
+
+| Say | What happens |
+|---|---|
+| "set a timer for 5 minutes" / "ten minute timer for the pasta" / "timer 90 seconds" | Counts down; when it's up JARVIS says so, shows it and chimes (even when muted). Up to 8 at once, up to a day |
+| "remind me in 10 minutes to call mom" / "remind me to drink water in half an hour" | A reminder with your words |
+| "timers" / "how much time is left" | Lists what's running |
+| "cancel the timer" | Cancels them |
+| "what's 12 times 8" / "15 percent of 80" / "square root of 144" / "2+2" / "3 to the power of 4" | Calculator (plus, minus, times, divided by, percent of, squared, square root, powers, number words) |
+| "pause" / "play" / "next song" / "previous track" / "stop the music" | Media keys: whatever is playing (Spotify, YouTube, ...) |
+| "volume 50" / "set the volume to 30 percent" / "max volume" / "half volume" | Sets the level exactly |
+| "what's the volume" | Tells you the level |
+| "note buy milk" / "remember that the meeting is at 3" / "take a note ..." | Appends a dated line to `Documents\JARVIS notes.txt` |
+| "notes" / "read my notes" | Shows the last 8 notes (says the latest); "open notes" opens the file |
+| "sleep" / "shut down" / "restart" / "sign out" / "hibernate" | Asks **"...the PC? Say yes or no"** first. Shutdown and restart wait 3 seconds; "cancel shutdown" stops them |
+| "empty the recycle bin" | Asks first, then empties it |
+| "repeat that" / "say that again" | Says the last reply again |
+
+Timers live in the JARVIS window: keep it open (`stay_open=1`, the default) until they go off.
+**Up / Down** with no results on screen step through your earlier commands.
+
 ### JARVIS's voice
 
 | Say / do | What happens |
@@ -183,7 +204,7 @@ You can also just type. Results show up live while you type.
 |---|---|
 | Enter | Open the selected result |
 | Shift + Enter | Show it in its folder |
-| Up / Down | Move through results |
+| Up / Down | Move through results; with no results, earlier commands |
 | F2, Ctrl + Space, or the Copilot key again | Mic on / off (while JARVIS talks: stop it and listen) |
 | Ctrl + M | Mute / unmute JARVIS's voice |
 | Ctrl + L | Clear the box and the results |
@@ -292,6 +313,7 @@ left-click the icon to show the bar, or right-click it for **Show** / **Exit**. 
 | `src/search.c` | File index + fuzzy search, Start Menu app search |
 | `src/voice.c` | Speech recognition (Whisper via the mic + VAD, or SAPI) and text-to-speech (SAPI) on its own thread |
 | `src/whisper.c` | Whisper support: finds the install, voice-activity detection, WAV files, runs `whisper-cli.exe`, cleans its text |
+| `src/sys.c` | Volume level (Core Audio), media keys, sleep / shutdown / restart / sign out, empty the Recycle Bin |
 | `src/dialog.c` | Detects Upload/Open dialogs and fills in the file path |
 | `src/docs.c` | Document jobs (Office COM, Python + PyMuPDF), file ops, Explorer selection |
 | `src/config.c` | Loads `jarvis.ini` (creates it with defaults on first run) |

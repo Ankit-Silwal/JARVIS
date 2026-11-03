@@ -71,6 +71,7 @@
 #define SS             3          /* dot supersampling factor */
 
 #define EDIT_ID        100
+#define HIST_MAX       32
 #define WM_APP_CLOSE   (WM_APP + 20)
 #define WM_APP_NORMAL  (WM_APP + 21)   /* pill clicked: show the bar */
 #define WM_APP_TRAY    (WM_APP + 22)   /* tray icon mouse event */
@@ -126,6 +127,8 @@ static struct {
     bool  tracking;
 
     bool  stay;                 /* stay_open: run until the user closes JARVIS */
+    wchar_t hist[HIST_MAX][LINE_MAX_CH];   /* earlier commands, oldest first (Up / Down) */
+    int   nhist, hist_pos;      /* hist_pos == nhist: not browsing */
     bool  from_voice;           /* the command being run was spoken */
     bool  close_hover;          /* mouse over the x button */
     bool  mute_hover;           /* mouse over the speaker button */
@@ -998,6 +1001,68 @@ static void apply_result(CmdResult *r)
     state_changed();
 }
 
+/* ------------------------------------------------------------- history */
+static void hist_path(wchar_t *out) { swprintf(out, MAX_PATH, L"%ls\\history.txt", g_cfg.data_dir); }
+
+static void hist_load(void)
+{
+    wchar_t p[MAX_PATH];
+    hist_path(p);
+    HANDLE h = CreateFileW(p, GENERIC_READ, FILE_SHARE_READ | FILE_SHARE_WRITE, NULL, OPEN_EXISTING, 0, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    DWORD size = GetFileSize(h, NULL), rd = 0;
+    char *buf = size < 256 * 1024 ? malloc(size + 1) : NULL;
+    if (buf) ReadFile(h, buf, size, &rd, NULL);
+    CloseHandle(h);
+    if (!buf) return;
+    buf[rd] = 0;
+    wchar_t *all = wide_from_utf8(buf, -1);
+    free(buf);
+    if (!all) return;
+    for (wchar_t *ctx = NULL, *t = wcstok(all, L"\r\n", &ctx); t; t = wcstok(NULL, L"\r\n", &ctx)) {
+        str_trim(t);
+        if (!t[0]) continue;
+        if (g.nhist == HIST_MAX) { memmove(g.hist[0], g.hist[1], sizeof g.hist[0] * (HIST_MAX - 1)); g.nhist--; }
+        str_copy(g.hist[g.nhist++], LINE_MAX_CH, t);
+    }
+    free(all);
+    g.hist_pos = g.nhist;
+}
+
+static void hist_add(const wchar_t *cmd)
+{
+    if (g.nhist && str_eq(g.hist[g.nhist - 1], cmd)) { g.hist_pos = g.nhist; return; }
+    if (g.nhist == HIST_MAX) { memmove(g.hist[0], g.hist[1], sizeof g.hist[0] * (HIST_MAX - 1)); g.nhist--; }
+    str_copy(g.hist[g.nhist++], LINE_MAX_CH, cmd);
+    g.hist_pos = g.nhist;
+    /* rewrite the file with what we keep (small) */
+    wchar_t p[MAX_PATH];
+    hist_path(p);
+    HANDLE h = CreateFileW(p, GENERIC_WRITE, FILE_SHARE_READ, NULL, CREATE_ALWAYS, FILE_ATTRIBUTE_NORMAL, NULL);
+    if (h == INVALID_HANDLE_VALUE) return;
+    for (int i = 0; i < g.nhist; i++) {
+        wchar_t line[LINE_MAX_CH + 2];
+        swprintf(line, LINE_MAX_CH + 2, L"%ls\r\n", g.hist[i]);
+        char *u8 = utf8_from_wide(line);
+        DWORD wr;
+        if (u8) { WriteFile(h, u8, (DWORD)strlen(u8), &wr, NULL); free(u8); }
+    }
+    CloseHandle(h);
+}
+
+/* Up / Down with no list on screen: earlier commands */
+static bool hist_move(int d)
+{
+    if (g.nrows || !g.nhist) return false;
+    int p = g.hist_pos + d;
+    if (p < 0) p = 0;
+    if (p > g.nhist) p = g.nhist;
+    g.hist_pos = p;
+    set_edit_text(p < g.nhist ? g.hist[p] : L"");
+    g.edit_from_cmd = true;
+    return true;
+}
+
 static void run_text(const wchar_t *text)
 {
     if (g.busy || g.closing) return;
@@ -1006,6 +1071,7 @@ static void run_text(const wchar_t *text)
     str_copy(buf, LINE_MAX_CH, text);
     str_trim(buf);
     if (!buf[0]) return;
+    hist_add(buf);
 
     switch (mode_phrase(buf)) {
     case MP_HIDE:
@@ -1149,8 +1215,8 @@ static LRESULT CALLBACK edit_proc(HWND h, UINT m, WPARAM w, LPARAM l, UINT_PTR i
         case VK_ESCAPE:   /* the first Esc stops JARVIS talking, the next one closes */
             if (!stop_talking(false)) begin_close();
             return 0;
-        case VK_UP:     move_sel(-1); return 0;
-        case VK_DOWN:   move_sel(1); return 0;
+        case VK_UP:     if (!hist_move(-1)) move_sel(-1); return 0;
+        case VK_DOWN:   if (!hist_move(1)) move_sel(1); return 0;
         case VK_F2:     ui_toggle_listen(); return 0;
         case VK_SPACE:
             if (ctrl) { g.ctrl_space = true; ui_toggle_listen(); return 0; }
@@ -1356,6 +1422,21 @@ static LRESULT CALLBACK wnd_proc(HWND h, UINT m, WPARAM w, LPARAM l)
             KillTimer(h, T_LINGER);
             g.linger = false;
             pill_refresh();
+            break;
+        default:
+            if (w >= TIMER_ID_BASE && w < TIMER_ID_BASE + MAX_TIMERS && !g.closing) {
+                static CmdResult tr;
+                cmd_timer_fired((int)w, &tr);
+                if (tr.reply[0]) {
+                    MessageBeep(MB_ICONASTERISK);   /* heard even when JARVIS is muted */
+                    if (!g.bg) {   /* behind another app: come to the front without stealing focus */
+                        SetWindowPos(h, HWND_TOPMOST, 0, 0, 0, 0, SWP_NOMOVE | SWP_NOSIZE | SWP_NOACTIVATE | SWP_SHOWWINDOW);
+                        FLASHWINFO fw = { sizeof fw, h, FLASHW_TRAY | FLASHW_TIMERNOFG, 3, 0 };
+                        FlashWindowEx(&fw);
+                    }
+                    if (!g.busy) apply_result(&tr);
+                }
+            }
             break;
         }
         return 0;
@@ -1613,6 +1694,7 @@ bool ui_create(HINSTANCE inst, HWND dialog, bool listen, const wchar_t *initial_
                              NULL, NULL, inst, NULL);
     if (!g.hwnd) return false;
     cmd_set_notify(g.hwnd);   /* document tasks report back with WM_APP_TASK */
+    hist_load();
     g.dpi = GetDpiForWindow(g.hwnd);
     if (!g.dpi) g.dpi = 96;
 
