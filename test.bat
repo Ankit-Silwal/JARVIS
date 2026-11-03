@@ -20,6 +20,10 @@ echo === building test_docs_cmd
 gcc %CFLAGS% tests\test_docs_cmd.c src\commands.c src\search.c src\dialog.c src\docs.c src\util.c src\config.c -o build\tests\test_docs_cmd.exe %LIBS% -loleaut32
 if errorlevel 1 goto :fail
 
+echo === building test_cmd
+gcc %CFLAGS% tests\test_cmd.c src\commands.c src\search.c src\dialog.c src\docs.c src\util.c src\config.c -o build\tests\test_cmd.exe %LIBS% -loleaut32
+if errorlevel 1 goto :fail
+
 echo === building test_docs (runs only with JARVIS_DOCS_TEST=1)
 gcc %CFLAGS% tests\test_docs.c src\docs.c src\util.c src\config.c -o build\tests\test_docs.exe %LIBS% -loleaut32
 if errorlevel 1 goto :fail
@@ -37,6 +41,11 @@ if errorlevel 1 goto :fail
 echo.
 echo === running test_docs_cmd
 build\tests\test_docs_cmd.exe
+if errorlevel 1 goto :fail
+
+echo.
+echo === running test_cmd
+build\tests\test_cmd.exe
 if errorlevel 1 goto :fail
 
 echo.

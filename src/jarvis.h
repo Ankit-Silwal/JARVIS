@@ -65,7 +65,8 @@ typedef struct {
     KVList folders;   /* spoken name -> folder path */
     wchar_t **roots;  int nroots;   /* folders to index */
     wchar_t **skip;   int nskip;    /* folder names to skip while indexing */
-    bool  speak;
+    bool  speak;                 /* say replies out loud ("mute jarvis" turns it off) */
+    bool  speak_confirm;         /* also say short confirmations ("Opening Downloads.") */
     bool  listen_on_start;
     bool  background;            /* mode=background: no window, just listen + talk */
     bool  stay_open;             /* keep running after a command until the user closes JARVIS */
@@ -82,6 +83,8 @@ typedef struct {
 
 extern Config g_cfg;
 void config_load(void);
+/* writes one setting into jarvis.ini (keeps the rest of the file) */
+void config_save_int(const wchar_t *section, const wchar_t *key, int value);
 const wchar_t *kv_get(const KVList *l, const wchar_t *key);
 
 /* ---------------------------------------------------------------- search.c */
@@ -141,6 +144,7 @@ typedef enum {
 bool voice_start(HWND notify);     /* starts voice thread (async init) */
 void voice_listen(bool on);
 void voice_say(const wchar_t *text, bool listen_after);
+void voice_hush(bool listen_after);   /* stop talking now (then listen if asked / pending) */
 void voice_stop(DWORD wait_ms);    /* finishes speech (up to wait_ms) and ends thread */
 bool voice_available(void);
 
@@ -163,6 +167,9 @@ typedef enum {
 typedef struct {
     wchar_t reply[300];       /* shown + spoken */
     bool    speak;            /* speak reply */
+    bool    ack;              /* reply is only a confirmation ("Opening X."): not spoken
+                                 when speak_confirm=0 ("talk less") */
+    bool    clear;            /* clear the box, the reply and the list ("clear") */
     bool    close;            /* close overlay after replying (ignored with stay_open) */
     bool    quit;             /* the user asked to close JARVIS ("close", "exit", "bye"...) */
     bool    listen_again;     /* expect a follow-up (e.g. "number two") */
@@ -190,6 +197,10 @@ HWND cmd_dialog(void);
  *   "SYS <name>"         system action: lock, screenshot, volume_up, volume_down, mute, reindex
  *   "LIST <n>"           showed n rows for the user to pick from
  *   "SAY"                only replied (time, date, battery, help, not found...)
+ *   "SET speak=0|1"      JARVIS's voice muted / unmuted ("mute jarvis", "stop talking",
+ *                        "be quiet" / "unmute jarvis", "voice on")
+ *   "SET speak_confirm=0|1"  "talk less" / "talk more" (confirmations shown, not spoken)
+ *   "CLEAR"              cleared the box ("clear", "clear screen")
  *   "CLOSE"              closed without doing anything
  *   "DOC convert-pdf <src> -> <dst>"           Word/PowerPoint/Excel/image to PDF
  *   "DOC convert-docx <src> -> <dst>"          PDF to Word

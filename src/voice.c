@@ -14,6 +14,7 @@
 #define VM_LISTEN (WM_APP + 50)
 #define VM_SAY    (WM_APP + 51)
 #define VM_QUIT   (WM_APP + 52)
+#define VM_HUSH   (WM_APP + 53)   /* stop speaking now; wParam: listen afterwards */
 
 #define LISTEN_MS        9000   /* give up when nothing was said for this long */
 #define LISTEN_EXTEND_MS 4000   /* extra time once speech started */
@@ -230,6 +231,7 @@ static void pump_tts(void)
     while (SUCCEEDED(ISpVoice_GetEvents(g_tts, 1, &ev, &got)) && got) {
         if (ev.eEventId == SPEI_END_INPUT_STREAM) {
             SPVOICESTATUS st;
+            if (!g_speaking) { free_event(&ev); continue; }   /* already hushed */
             if (SUCCEEDED(ISpVoice_GetStatus(g_tts, &st, NULL)) && st.dwRunningState != SPRS_DONE) {
                 free_event(&ev);
                 continue;   /* another sentence still queued */
@@ -257,6 +259,18 @@ static void do_say(wchar_t *text, bool listen_after)
         if (g_listen_after_speech) { g_listen_after_speech = false; set_listen(true); }
     }
     free(text);
+}
+
+/* cut the current sentence (and anything queued) short */
+static void do_hush(bool listen)
+{
+    if (g_tts && g_speaking) ISpVoice_Speak(g_tts, NULL, SPF_ASYNC | SPF_PURGEBEFORESPEAK, NULL);
+    bool was = g_speaking;
+    g_speaking = false;
+    bool again = listen || g_listen_after_speech;
+    g_listen_after_speech = false;
+    if (was) post(VE_SPOKEN, 0);
+    if (again) set_listen(true);
 }
 
 static DWORD WINAPI voice_thread(LPVOID unused)
@@ -301,6 +315,9 @@ static DWORD WINAPI voice_thread(LPVOID unused)
             case VM_SAY:
                 do_say((wchar_t *)m.lParam, m.wParam != 0);
                 break;
+            case VM_HUSH:
+                do_hush(m.wParam != 0);
+                break;
             case VM_QUIT:
                 set_listen(false);
                 if (g_tts && m.wParam) ISpVoice_WaitUntilDone(g_tts, (ULONG)m.wParam);
@@ -343,6 +360,11 @@ void voice_say(const wchar_t *text, bool listen_after)
     if (!g_tid) return;
     wchar_t *copy = wcs_dup(g_cfg.speak && text ? text : L"");
     if (!PostThreadMessageW(g_tid, VM_SAY, listen_after, (LPARAM)copy)) free(copy);
+}
+
+void voice_hush(bool listen_after)
+{
+    if (g_tid) PostThreadMessageW(g_tid, VM_HUSH, listen_after, 0);
 }
 
 void voice_stop(DWORD wait_ms)
