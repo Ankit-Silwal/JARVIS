@@ -69,6 +69,16 @@ int wmain(void)
     run(L"open zzqqxxnotafile");
     CHECK(!r.ack, "not found is not a confirmation");
 
+    TEST_SECTION("misheard open");
+    const wchar_t *dl = kv_get(&g_cfg.folders, L"downloads");
+    wchar_t want[MAX_PATH];
+    swprintf(want, MAX_PATH, L"OPEN %ls", dl);
+    CHECK(str_eq(run(L"one downloads"), want), "one downloads = open downloads");
+    CHECK(str_eq(run(L"Won downloads,"), want), "won downloads");
+    CHECK(str_eq(run(L"opened downloads"), want), "opened downloads");
+    run(L"one");
+    CHECK(wcsstr(r.reply, L"no list") != NULL, "a bare one with no list is still a number");
+
     TEST_SECTION("clear");
     CHECK(str_eq(run(L"clear"), L"CLEAR") && r.clear && r.rows_replace && r.nrows == 0, "clear");
     CHECK(!r.reply[0], "clear says nothing");

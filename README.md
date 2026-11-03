@@ -11,7 +11,8 @@ Press the **Copilot key**, say what you want, and JARVIS does it.
   pick the browser: "open youtube in brave", "google black holes in firefox"
 - **Apps**: VS Code, Word, or any app in your Start Menu
 - **Little things**: time, date, battery, volume, lock, screenshot
-- **Works offline**: uses the speech recognizer and voices built into Windows. Nothing leaves your PC.
+- **Works offline**: speech recognition with **Whisper** (OpenAI's model, running on your PC) or the
+  recognizer built into Windows; the Windows voices talk back. Nothing leaves your PC.
 - **Stays until you close it**: ask one thing after another. Close with Esc, the **×** button, or say "close".
 - **Small**: one `.exe` + one `jarvis.ini`. Nothing runs in the background once you close it.
 
@@ -29,7 +30,39 @@ Press the **Copilot key**, say what you want, and JARVIS does it.
 2. Put it somewhere permanent, for example `%LOCALAPPDATA%\Programs\JARVIS\`.
    Or run `tools\install.ps1` (copies the exe and creates a Start Menu shortcut).
 3. Run `jarvis.exe` once. It creates `jarvis.ini` (your settings) next to the exe.
-4. Set up the Copilot key (below).
+4. **Install Whisper** so it actually understands you (strongly recommended, see below):
+   ```bat
+   powershell -ExecutionPolicy Bypass -File tools\get_whisper.ps1
+   ```
+5. Set up the Copilot key (below).
+
+## Speech recognition: Whisper
+
+Out of the box JARVIS uses the speech recognizer built into Windows. It is fast but old, and with
+an accent or a normal room it often hears something else entirely ("open downloads" → "and",
+"women on"). **Whisper** is OpenAI's speech model; JARVIS runs it on your PC with
+[whisper.cpp](https://github.com/ggml-org/whisper.cpp), offline, and it is in a different league.
+
+`tools\get_whisper.ps1` downloads whisper.cpp (release b5454, Windows x64) and the English
+`small.en` model (~190 MB) into `%LOCALAPPDATA%\JARVIS\whisper`, checking every file against a
+pinned SHA-256. Run it again with `-Model base.en` for a smaller, faster model (~60 MB, a bit less
+accurate). The next time JARVIS starts it uses Whisper; the log says `voice: Whisper small.en-q5_1`.
+
+How it works: JARVIS records the microphone, notices when you start and stop talking, and hands
+that clip to `whisper-cli.exe` in a hidden process. The mic dot shows **Thinking…** for about a
+second (`small.en`) while it transcribes. The prompt it gets lists the command words and the names
+from your `jarvis.ini`, so "vs code", "gmail" and your folder names come out spelled right.
+
+| `jarvis.ini` `[voice]` | |
+|---|---|
+| `engine=auto` | Whisper when installed, else Windows. `whisper` / `windows` to force one |
+| `whisper_dir=` | Folder with `bin\whisper-cli.exe` and the model (empty = `%LOCALAPPDATA%\JARVIS\whisper`) |
+| `model=` | Model file to use (empty = the best one found: `small.en`, then `base.en`) |
+| `language=en` | `auto` only works with a multilingual model such as `ggml-small.bin` |
+| `threads=0` | CPU threads for Whisper (0 = pick) |
+
+Check it from a terminal: `jarvis.exe --transcribe %LOCALAPPDATA%\JARVIS\last_utterance.wav`
+transcribes the last thing JARVIS heard and prints it.
 
 ## Copilot key setup (short version)
 
@@ -171,6 +204,7 @@ Names on the left are what you **say** (lowercase). Delete the file to get the d
 | `[sites]` | spoken name = website |
 | `[apps]` | spoken name = program, `ms-settings:` link, etc. |
 | `[folders]` | spoken name = folder |
+| `[voice]` | `engine` (auto / whisper / windows), `whisper_dir`, `model`, `language`, `threads` - see "Speech recognition: Whisper" |
 | `[docs]` | `python` = python.exe with PyMuPDF for PDF split / merge (empty = find it) |
 
 Examples - add your own:
@@ -201,7 +235,9 @@ Desktop, Documents, Downloads, Pictures, Videos, Music and OneDrive are always i
 
 - **Nothing runs once you close it.** While open and idle it uses no timers and no polling
   (with `stay_open=0` it closes by itself after each answer).
-- **Nothing leaves your PC.** Speech recognition and voices are the ones built into Windows.
+- **Nothing leaves your PC.** Whisper runs locally (the only download is the one-time install);
+  the fallback recognizer and the voices are the ones built into Windows. The last thing you said
+  is kept as `%LOCALAPPDATA%\JARVIS\last_utterance.wav` for troubleshooting.
 - File index: `%LOCALAPPDATA%\JARVIS\index.txt`. It loads in milliseconds. When it's older than
   `index_max_age_min` (default 30 min), JARVIS re-scans in the background while you use it.
 - Log: `%LOCALAPPDATA%\JARVIS\jarvis.log` (kept small).
@@ -214,7 +250,9 @@ Desktop, Documents, Downloads, Pictures, Videos, Music and OneDrive are always i
 |---|---|
 | It doesn't hear me | Settings → Privacy & security → **Microphone** → turn on **"Let desktop apps access your microphone"**. Check the right mic is the default in Sound settings. |
 | No speech recognition at all | JARVIS needs the Windows recognizer "Microsoft Speech Recognizer 8.0 for Windows (English - US)". Settings → Time & language → Language & region / Speech: make sure **English (United States)** is installed with speech. |
-| It mishears me | Speak **after** the mic dot turns blue. Use short commands ("open downloads", not a full sentence). Quiet room helps. If available, run Control Panel → Speech Recognition → **Train your computer to better understand you** (not on every Windows build). You can always type instead. |
+| It mishears me | Install Whisper (`tools\get_whisper.ps1`), it fixes most of this. Speak **after** the mic dot turns blue. Short commands work best ("open downloads"). Check what it heard: `%LOCALAPPDATA%\JARVIS\jarvis.log` has a `whisper: "..."` line for every utterance; `jarvis.exe --transcribe %LOCALAPPDATA%\JARVIS\last_utterance.wav` replays the last one. You can always type instead. |
+| Whisper doesn't start | The log says `voice: Whisper not installed in ...` → run `tools\get_whisper.ps1` (it needs `bin\whisper-cli.exe` and a `ggml-*.bin` model in that folder). `mic: waveInOpen failed` → no microphone, or desktop apps aren't allowed to use it (Settings → Privacy & security → Microphone). |
+| It hears me but says "nothing usable" | The log shows what Whisper returned. Very short noises are dropped on purpose. A different model (`-Model base.en`) or `language=` may help. |
 | File not found | Run `jarvis.exe --reindex`, or say "reindex". If the file is outside your normal folders, add its folder to `roots` in `[search]`. |
 | Wrong app / site opens | Add or fix the name in `[apps]` / `[sites]`. |
 
@@ -229,6 +267,7 @@ jarvis.exe --reindex
 ```
 
 `--dry-run` prints what the command **would** do (nothing is opened). `--search` prints matching files.
+`--transcribe file.wav` (16 kHz mono 16-bit) prints what Whisper hears in it.
 Tip: use Command Prompt. In PowerShell add `| Out-String` at the end so it waits for the output.
 
 Other options: `jarvis.exe --type` (open without listening), `jarvis.exe --background` (no window: just listen and talk; a small "Listening…" pill shows at the bottom and the bar appears only when you need to pick from a list), `jarvis.exe --normal` (always show the bar), `jarvis.exe "open downloads"` (run a command right away).
@@ -251,13 +290,14 @@ left-click the icon to show the bar, or right-click it for **Show** / **Exit**. 
 | `src/ui.c` | The search bar (mic dot, text box, results, keyboard) and the background-mode pill |
 | `src/commands.c` | Understands commands and does the actions |
 | `src/search.c` | File index + fuzzy search, Start Menu app search |
-| `src/voice.c` | Offline speech recognition and text-to-speech (SAPI) on its own thread |
+| `src/voice.c` | Speech recognition (Whisper via the mic + VAD, or SAPI) and text-to-speech (SAPI) on its own thread |
+| `src/whisper.c` | Whisper support: finds the install, voice-activity detection, WAV files, runs `whisper-cli.exe`, cleans its text |
 | `src/dialog.c` | Detects Upload/Open dialogs and fills in the file path |
 | `src/docs.c` | Document jobs (Office COM, Python + PyMuPDF), file ops, Explorer selection |
 | `src/config.c` | Loads `jarvis.ini` (creates it with defaults on first run) |
 | `src/util.c` | String, path and log helpers |
 | `res/` | Manifest, version info |
-| `tools/` | Build helper, `install.ps1` |
+| `tools/` | Build helper, `install.ps1`, `get_whisper.ps1` (downloads whisper.cpp + a model, checksums pinned) |
 | `docs/COPILOT_KEY.md` | Copilot key setup |
 
 ## Building and tests
@@ -268,14 +308,15 @@ test.bat      :: runs the tests
 ```
 
 `test.bat` skips the slow real document test (Word, Excel, PyMuPDF on throwaway files in `%TEMP%`);
-run it with `set JARVIS_DOCS_TEST=1` first.
+run it with `set JARVIS_DOCS_TEST=1` first. `set JARVIS_WHISPER_TEST=1` adds a real recognition test:
+the Windows voice speaks a few commands into WAV files and Whisper must hear them back exactly.
 
 Needs MinGW-w64 `gcc` + `windres` on PATH. Uses only Windows system libraries, no other dependencies.
 
 ## Architecture
 
 - **One small exe, no service.** A named mutex keeps one instance; launching again posts "toggle mic" to the open window.
-- **Voice on a worker thread.** SAPI recognizer + TTS live on their own thread and talk to the UI with window messages, so the overlay never freezes.
+- **Voice on a worker thread.** The recognizer and TTS live on their own thread and talk to the UI with window messages, so the overlay never freezes. With Whisper the thread records the mic (waveIn, 16 kHz), an energy-based VAD cuts the utterance out (noise floor learned per listen, ~750 ms of silence ends it), and `whisper-cli.exe` transcribes the clip in a hidden process with an audio context sized to the clip (3x faster than the default 30 s window).
 - **Command grammar.** `commands.c` turns text (spoken or typed) into an action: open, reveal, fill dialog, URL, app, or system action.
 - **Cached file index.** A flat list of files saved to `index.txt`, loaded instantly, refreshed on a low-priority background thread only when stale.
 - **Dialog filling.** The window that had focus before JARVIS opened is checked for a standard Open/Upload dialog; the path is typed into its "File name" box.

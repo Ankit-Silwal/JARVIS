@@ -76,10 +76,18 @@ typedef struct {
     int   close_delay_ms;
     wchar_t browser[MAX_PATH];
     wchar_t docs_python[MAX_PATH];  /* [docs] python= (empty: auto-detect) */
+    /* [voice] */
+    int     engine;                 /* ENGINE_AUTO / ENGINE_WHISPER / ENGINE_WINDOWS */
+    wchar_t whisper_dir[MAX_PATH];  /* folder with whisper-cli.exe + model (empty: %LOCALAPPDATA%\JARVIS\whisper) */
+    wchar_t whisper_model[MAX_PATH];/* model file name (empty: best one found) */
+    wchar_t whisper_lang[16];       /* "en" (or "auto" with a multilingual model) */
+    int     whisper_threads;        /* 0 = pick */
     wchar_t ini_path[MAX_PATH];
     wchar_t data_dir[MAX_PATH];
     wchar_t exe_dir[MAX_PATH];
 } Config;
+
+enum { ENGINE_AUTO, ENGINE_WHISPER, ENGINE_WINDOWS };
 
 extern Config g_cfg;
 void config_load(void);
@@ -139,6 +147,7 @@ typedef enum {
     VE_LEVEL,         /* lParam: 0..100 */
     VE_TIMEOUT,
     VE_SPOKEN,        /* text-to-speech finished */
+    VE_THINKING,      /* lParam: 1 transcribing what was said (Whisper), 0 done */
 } VoiceEvent;
 
 bool voice_start(HWND notify);     /* starts voice thread (async init) */
@@ -147,6 +156,29 @@ void voice_say(const wchar_t *text, bool listen_after);
 void voice_hush(bool listen_after);   /* stop talking now (then listen if asked / pending) */
 void voice_stop(DWORD wait_ms);    /* finishes speech (up to wait_ms) and ends thread */
 bool voice_available(void);
+const wchar_t *voice_engine_name(void);   /* "Whisper (small.en)" / "Windows" / "" */
+
+/* -------------------------------------------------------------- whisper.c */
+#define VAD_FRAME 480            /* 30 ms at 16 kHz */
+enum { VAD_NONE, VAD_START, VAD_END, VAD_DISCARD };
+typedef struct {
+    int    frames, start, end;   /* frame counters; start/end: the utterance */
+    int    above, voiced, silent;
+    double floor;                /* room noise (rms) */
+    bool   speech;
+    int    level;                /* 0..100 for the mic dot */
+} Vad;
+void vad_reset(Vad *v);
+int  vad_frame(Vad *v, const short *frame);   /* one VAD_FRAME of samples */
+void whisper_dir(wchar_t *out);
+bool whisper_find(wchar_t *exe, wchar_t *model);
+void whisper_prompt(wchar_t *out, size_t cap);
+HANDLE whisper_start(const short *pcm, int n, const wchar_t *exe, const wchar_t *model, const wchar_t *prompt);
+bool whisper_finish(HANDLE proc, wchar_t *out, size_t cap);
+bool whisper_clean(wchar_t *text);
+bool whisper_run(const short *pcm, int n, wchar_t *out, size_t cap, DWORD timeout_ms);
+bool wav_write(const wchar_t *path, const short *pcm, int n);
+short *wav_read(const wchar_t *path, int *n);
 
 /* -------------------------------------------------------------- commands.c */
 typedef enum { ROW_HIT, ROW_INFO } RowKind;

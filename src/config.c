@@ -108,6 +108,21 @@ L"word=winword.exe\r\n"
 L"powerpoint=powerpnt.exe\r\n"
 L"excel=excel.exe\r\n"
 L"\r\n"
+L"[voice]\r\n"
+L"; Speech recognizer: auto = Whisper when installed, else the Windows one.\r\n"
+L"; Whisper (OpenAI's model, runs offline on your PC) is far more accurate. Install it with\r\n"
+L";   powershell -ExecutionPolicy Bypass -File tools\\get_whisper.ps1\r\n"
+L"; engine=auto | whisper | windows\r\n"
+L"engine=auto\r\n"
+L"; folder with whisper-cli.exe and the model (empty = %LOCALAPPDATA%\\JARVIS\\whisper)\r\n"
+L"whisper_dir=\r\n"
+L"; model file to use (empty = the best one in the folder: small.en, then base.en)\r\n"
+L"model=\r\n"
+L"; language for Whisper (en; \"auto\" only works with a multilingual model like ggml-small.bin)\r\n"
+L"language=en\r\n"
+L"; CPU threads for Whisper (0 = pick)\r\n"
+L"threads=0\r\n"
+L"\r\n"
 L"[docs]\r\n"
 L"; Python with PyMuPDF (pip install pymupdf) for splitting / merging PDFs.\r\n"
 L"; Empty = look for Anaconda, python.org installs and python.exe on PATH.\r\n"
@@ -295,6 +310,17 @@ void config_load(void)
         /* [docs] python=: interpreter with PyMuPDF for PDF split/merge (empty: find one) */
         read_str(L"docs", L"python", L"", b, MAX_PATH);
         expand_env(b, g_cfg.docs_python, MAX_PATH);
+        /* [voice] */
+        read_str(L"voice", L"engine", L"auto", b, MAX_PATH);
+        g_cfg.engine = !_wcsicmp(b, L"whisper") ? ENGINE_WHISPER
+                     : (!_wcsicmp(b, L"windows") || !_wcsicmp(b, L"sapi")) ? ENGINE_WINDOWS : ENGINE_AUTO;
+        read_str(L"voice", L"whisper_dir", L"", b, MAX_PATH);
+        expand_env(b, g_cfg.whisper_dir, MAX_PATH);
+        read_str(L"voice", L"model", L"", b, MAX_PATH);
+        expand_env(b, g_cfg.whisper_model, MAX_PATH);
+        read_str(L"voice", L"language", L"en", g_cfg.whisper_lang, 16);
+        if (!g_cfg.whisper_lang[0]) str_copy(g_cfg.whisper_lang, 16, L"en");
+        g_cfg.whisper_threads = read_int(L"voice", L"threads", 0);
     }
 
     /* built-in folders (spoken name -> path); [folders] in the ini can add/override */

@@ -105,6 +105,7 @@ static struct {
     /* state */
     bool  bg;                   /* background (hidden) mode */
     bool  listening, listen_requested, speaking, busy, closing, anim_on;
+    bool  thinking;             /* Whisper is transcribing what was said */
     int   voice_state;          /* 0 unknown, 1 ok, -1 unavailable */
     double level, level_target; /* mic level 0..1 */
     DWORD shown_at;
@@ -388,6 +389,7 @@ static void update_cue(void)
 {
     const wchar_t *c = g.voice_state < 0 ? L"Search or type a command"
                      : (g.listening || g.listen_requested) ? L"Listening\x2026"
+                     : g.thinking ? L"Thinking\x2026"
                      : L"Search or say a command";
     if (!g.edit || str_eq(c, g.cue)) return;
     str_copy(g.cue, 64, c);
@@ -439,7 +441,7 @@ static void render_dot(HDC dst, int x, int y, COLORREF bg)
         double halo = R + 1.2 + 2.6 * lv + 1.0 * breath;
         disc(dc, c, c, halo * u, mix(bg, T.accent, 0.16 + 0.14 * lv));
         disc(dc, c, c, R * u, T.accent);
-    } else if (g.listen_requested || g.speaking || g.busy) {
+    } else if (g.listen_requested || g.speaking || g.busy || g.thinking) {
         disc(dc, c, c, R * u, mix(bg, T.accent, 0.65));
     } else {
         disc(dc, c, c, R * u, mix(bg, T.dim, 0.75));
@@ -706,6 +708,8 @@ static void pill_refresh(void)
         if (g.listening || g.listen_requested) {
             if (g.hyp[0]) txt = g.hyp;
             else { txt = L"Listening\x2026"; dim = true; }
+        } else if (g.thinking) {
+            txt = L"Thinking\x2026"; dim = true;
         } else if (g.status[0] && (g.speaking || g.close_pending || g.linger)) {
             txt = g.status;   /* the reply, until we exit */
         }
@@ -1283,6 +1287,11 @@ static void on_voice(WPARAM ev, LPARAM lp)
         if (g.edit_from_cmd && g.hyp[0] == 0) { set_edit_text(L""); g.edit_from_cmd = false; }
         set_status(g.stay ? L"Press F2 or the Copilot key to talk"
                           : L"Didn't hear anything \x2014 press F2 to talk", ST_HINT);
+        break;
+    case VE_THINKING:
+        g.thinking = lp != 0;
+        if (g.thinking) g.level = g.level_target = 0;
+        state_changed();
         break;
     case VE_SPOKEN:
         g.speaking = false;
