@@ -373,7 +373,12 @@ static bool find_token(const wchar_t *hay, const wchar_t *orig, const wchar_t *t
     const wchar_t *p = hay;
     bool found = false;
     *at_word = false;
+    /* a number must match a whole number: "2" is not in "chapter23" or a hash */
+    bool num = iswdigit(tok[0]) != 0;
+    for (const wchar_t *c = tok; num && *c; c++) num = iswdigit(*c) != 0;
+    size_t tl = wcslen(tok);
     while ((p = wcsstr(p, tok)) != NULL) {
+        if (num && ((p > hay && iswdigit(p[-1])) || iswdigit(p[tl]))) { p++; continue; }
         found = true;
         if (word_start(orig, (size_t)(p - hay))) { *at_word = true; return true; }
         p++;

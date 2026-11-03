@@ -289,13 +289,21 @@ int wmain(void)
             fputs("X\t1\t0\tC:\\bogus kind.pdf\n", wf);
             fputs("F\t-7\t0\tC:\\negative depth.pdf\n", wf);
             fputs("F\t1\t0\t\n", wf);
+            fputs("F\t1\t0\tC:\\x\\report 2026.pdf\n", wf);
+            fputs("F\t1\t0\tC:\\x\\report_20261026T205936.pdf\n", wf);
+            fputs("F\t1\t0\tC:\\x\\report-5b7959e238968957.pdf\n", wf);
             fputs("F\t1\t0\tC:\\no newline at end.pdf", wf);
             fclose(wf);
         }
         free(u);
         search_init();             /* index.txt is fresh: loads, no rebuild */
         search_wait(20000);
-        CHECKF(search_count() == 2, "2 valid entries loaded (got %d)", search_count());
+        CHECKF(search_count() == 5, "5 valid entries loaded (got %d)", search_count());
+        TEST_SECTION("numbers match whole numbers only");
+        n = run(L"report 2026", NULL, EXT_ANY, 0, h);
+        CHECK(n == 1 && ends_with(&h[0], L"report 2026.pdf"), "2026 not matched inside a timestamp");
+        n = run(L"report 2", NULL, EXT_ANY, 0, h);
+        CHECK(n == 0, "2 not matched inside a hash / timestamp / 2026");
         n = run(L"tax return", NULL, EXT_ANY, 0, h);
         CHECK(n == 1 && ends_with(&h[0], L"Tax Return.pdf"), "CRLF line: path has no trailing \\r");
         CHECK(n == 1 && h[0].mtime.dwLowDateTime == 0, "CRLF line loaded");
